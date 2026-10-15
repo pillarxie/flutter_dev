@@ -16,7 +16,8 @@
 
 Flutter Dev 是独立的 Flutter 桌面运行调试工作台。Flutter 负责界面，Rust 以应用内库管理 SDK、协议、会话、子进程、设置、构建及有界数据。
 
-- `README.md`：当前能力、开发运行、使用说明和验证命令。
+- `README.md`：项目介绍、功能、快速开始和贡献入口。
+- `docs/usage.md`、`docs/development.md`：详细使用说明、桥接生成和验证命令。
 - `docs/technical-design.md`：架构与产品目标，包含尚未实施的内容。
 - `docs/implementation-scope.md`：各阶段范围记录，旧段落不代表最新状态。
 - `docs/compatibility-baseline.md`：工具版本、平台能力及已知限制。
@@ -83,7 +84,7 @@ flutter test
 git diff --check
 ```
 
-- 实际 FFI 测试先构建原生库，通过 `--dart-define=FLUTTER_DEV_NATIVE_LIBRARY=绝对路径` 加载，并设置 `FLUTTER_DEV_SETTINGS_PATH` 为此次测试专用文件。具体命令见 README。
+- 实际 FFI 测试先构建原生库，通过 `--dart-define=FLUTTER_DEV_NATIVE_LIBRARY=绝对路径` 加载，并设置 `FLUTTER_DEV_SETTINGS_PATH` 为此次测试专用文件。具体命令见 `docs/development.md`。
 - 真实 SDK、launch、网络及 DevTools 集成测试使用可丢弃样例项目和测试拥有的进程，不操作用户业务工程或个人应用设置。
 - 修改界面时验证深浅色、窄窗口、加载/失败状态、异步迟到结果和离开页面时的资源释放；复用现有测试和预览方式。
 - 宿主或打包改动在对应平台执行 release 构建。macOS 构建不能证明 Windows/Linux 已通过。
