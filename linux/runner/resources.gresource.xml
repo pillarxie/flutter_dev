@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/dev/flutterdev">
+    <file alias="app-icon.png">app-icon-256.png</file>
+  </gresource>
+</gresources>

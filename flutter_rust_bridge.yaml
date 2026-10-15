@@ -1,0 +1,6 @@
+rust_input: crate::api
+rust_root: rust/
+dart_output: lib/core/bridge/generated
+web: false
+type_64bit_int: true
+stop_on_error: true
