@@ -17,7 +17,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 60
     env:
-      FLUTTER_DEV_SETTINGS_PATH: ${{ runner.temp }}/flutter-dev-package/settings.json
+      FLUTTER_DEV_SETTINGS_PATH: ${{ github.workspace }}/build/package-smoke-settings/settings.json
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
