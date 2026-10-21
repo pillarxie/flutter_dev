@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'productivity_models.dart';
+export 'productivity_models.dart';
+
 class Project {
   const Project({
     required this.name,
@@ -9,6 +12,24 @@ class Project {
   });
   final String name, path, entrypoint;
   final List<String> platforms;
+}
+
+class ProjectGitInfo {
+  const ProjectGitInfo({
+    required this.repositoryRoot,
+    this.currentBranch,
+    this.headCommit,
+    this.branches = const [],
+  });
+  final String repositoryRoot;
+  final String? currentBranch, headCommit;
+  final List<String> branches;
+
+  String get label =>
+      currentBranch ??
+      (headCommit == null
+          ? '尚无提交'
+          : '游离 HEAD · ${headCommit!.substring(0, headCommit!.length.clamp(0, 7))}');
 }
 
 class Sdk {
@@ -30,12 +51,14 @@ class AppSettings {
     this.buildPresets = const [],
     this.projects = const [],
     this.selectedProjectPath,
+    this.workspacePreferences = const WorkspacePreferences(),
   });
   final String? defaultSdkPath;
   final String themeMode;
   final List<BuildPreset> buildPresets;
   final List<Project> projects;
   final String? selectedProjectPath;
+  final WorkspacePreferences workspacePreferences;
 }
 
 class BuildPreset {
@@ -64,6 +87,15 @@ class BuildConfig {
   final List<String> args;
 }
 
+class BuildVersion {
+  const BuildVersion({this.buildName, this.buildNumber});
+  final String? buildName, buildNumber;
+
+  String get label => buildName == null && buildNumber == null
+      ? '未配置版本'
+      : '${buildName ?? '未配置'}+${buildNumber ?? '未配置'}';
+}
+
 class BuildSnapshot {
   const BuildSnapshot({
     required this.id,
@@ -73,10 +105,12 @@ class BuildSnapshot {
     this.outputDirectory,
     this.error,
     this.exitCode,
+    this.version,
   });
   final String id, projectPath, state, target;
   final String? outputDirectory, error;
   final int? exitCode;
+  final BuildVersion? version;
   bool get active => const ['starting', 'running', 'stopping'].contains(state);
 }
 
@@ -185,6 +219,28 @@ class WorkbenchEvent {
 }
 
 abstract class WorkbenchBridge {
+  Future<AppSettings> setWorkspacePreferences(
+    WorkspacePreferences preferences,
+  ) => Future.error(UnsupportedError('当前桥接不支持保存工作台配置'));
+  Future<void> openSourceLocation(
+    String projectPath,
+    String path,
+    int line,
+    int column,
+  ) => Future.error(UnsupportedError('当前桥接不支持打开源码'));
+  Future<List<String>> discoverTestFiles(String projectPath) async => [];
+  Future<TestRunSnapshot> startTestRun(TestRunConfig config) =>
+      Future.error(UnsupportedError('当前桥接不支持测试运行'));
+  Future<TestRunSnapshot> testRunSnapshot(String id) =>
+      Future.error(UnsupportedError('当前桥接不支持测试运行'));
+  Future<List<TestRunSnapshot>> listTestRuns() async => [];
+  Future<LogPage> readTestLogs(
+    String id, {
+    int afterId = 0,
+    int limit = 200,
+  }) async => LogPage(entries: const [], nextAfterId: afterId);
+  Future<void> stopTestRun(String id) =>
+      Future.error(UnsupportedError('当前桥接不支持停止测试'));
   Stream<WorkbenchEvent> get events;
   Future<AppSettings> getAppSettings();
   Future<AppSettings> setDefaultSdk(String? path);
@@ -195,11 +251,18 @@ abstract class WorkbenchBridge {
     String? selectedProjectPath,
   );
   Future<BuildSnapshot> startBuild(BuildConfig config);
+  Future<BuildVersion> readBuildVersion(String projectPath, List<String> args);
+  Future<List<BuildSnapshot>> listBuilds();
   Future<BuildSnapshot> buildSnapshot(String id);
   Future<LogPage> readBuildLogs(String id, {int afterId = 0, int limit = 200});
   Future<void> stopBuild(String id);
   Future<void> openBuildOutput(String id);
   Future<List<Project>> discoverProjects(String root);
+  Future<ProjectGitInfo?> projectGitInfo(String projectPath) async => null;
+  Future<ProjectGitInfo> switchProjectBranch(
+    String projectPath,
+    String branch,
+  ) => Future.error(UnsupportedError('当前桥接不支持切换 Git 分支'));
   Future<Sdk> resolveSdk(String projectPath, String? explicitPath);
   Future<List<Device>> listDevices(String sdkPath);
   Future<List<Emulator>> listEmulators(String sdkPath);

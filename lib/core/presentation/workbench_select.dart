@@ -29,6 +29,7 @@ class WorkbenchSelect<T> extends StatefulWidget {
     this.onChanged,
     this.hint = '请选择',
     this.menuWidth = 280,
+    this.compact = false,
   });
 
   final String label;
@@ -37,6 +38,7 @@ class WorkbenchSelect<T> extends StatefulWidget {
   final ValueChanged<T>? onChanged;
   final String hint;
   final double menuWidth;
+  final bool compact;
 
   @override
   State<WorkbenchSelect<T>> createState() => _WorkbenchSelectState<T>();
@@ -90,7 +92,7 @@ class _WorkbenchSelectState<T> extends State<WorkbenchSelect<T>> {
         final width = math.min(
           widget.menuWidth,
           math.min(
-          math.max(200.0, anchorWidth),
+            math.max(200.0, anchorWidth),
             MediaQuery.sizeOf(context).width - 32,
           ),
         );
@@ -222,6 +224,7 @@ class _WorkbenchSelectState<T> extends State<WorkbenchSelect<T>> {
               focusNode: _focus,
               onPressed: _enabled ? _toggle : null,
               style: TextButton.styleFrom(
+                alignment: widget.compact ? Alignment.centerLeft : null,
                 padding: EdgeInsets.zero,
                 minimumSize: Size.zero,
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -229,47 +232,91 @@ class _WorkbenchSelectState<T> extends State<WorkbenchSelect<T>> {
                   borderRadius: BorderRadius.circular(8),
                 ),
               ),
-              child: InputDecorator(
-                isFocused: _focus.hasFocus || controller.isOpen,
-                decoration: InputDecoration(
-                  labelText: widget.label,
-                  enabled: _enabled,
-                ),
-                child: LayoutBuilder(
-                  builder: (context, constraints) => Row(
-                    children: [
-                      if (selected?.icon != null &&
-                          constraints.maxWidth >= 144) ...[
-                        Icon(
-                          selected!.icon,
-                          size: 16,
-                          color: colors.onSurfaceVariant,
-                        ),
-                        const SizedBox(width: 8),
-                      ],
-                      Expanded(
-                        child: Text(
-                          selected?.label ?? widget.hint,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            fontSize: 13,
-                            color: _enabled
-                                ? colors.onSurface
-                                : colors.onSurfaceVariant,
+              child: widget.compact
+                  ? Semantics(
+                      label: widget.label,
+                      child: Tooltip(
+                        message:
+                            '${widget.label}：${selected?.label ?? widget.hint}',
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 5,
+                            horizontal: 4,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (constraints.maxWidth >= 100) ...[
+                                Icon(
+                                  selected?.icon ?? Icons.account_tree_outlined,
+                                  size: 14,
+                                  color: colors.onSurfaceVariant,
+                                ),
+                                const SizedBox(width: 6),
+                              ],
+                              Flexible(
+                                child: Text(
+                                  selected?.label ?? widget.hint,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    color: colors.onSurfaceVariant,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 4),
+                              Icon(
+                                Icons.keyboard_arrow_down_rounded,
+                                size: 16,
+                                color: colors.onSurfaceVariant,
+                              ),
+                            ],
                           ),
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        size: 18,
-                        color: colors.onSurfaceVariant,
+                    )
+                  : InputDecorator(
+                      isFocused: _focus.hasFocus || controller.isOpen,
+                      decoration: InputDecoration(
+                        labelText: widget.label,
+                        enabled: _enabled,
                       ),
-                    ],
-                  ),
-                ),
-              ),
+                      child: LayoutBuilder(
+                        builder: (context, constraints) => Row(
+                          children: [
+                            if (selected?.icon != null &&
+                                constraints.maxWidth >= 144) ...[
+                              Icon(
+                                selected!.icon,
+                                size: 16,
+                                color: colors.onSurfaceVariant,
+                              ),
+                              const SizedBox(width: 8),
+                            ],
+                            Expanded(
+                              child: Text(
+                                selected?.label ?? widget.hint,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  fontSize: 13,
+                                  color: _enabled
+                                      ? colors.onSurface
+                                      : colors.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Icon(
+                              Icons.keyboard_arrow_down_rounded,
+                              size: 18,
+                              color: colors.onSurfaceVariant,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
             ),
           ),
         );

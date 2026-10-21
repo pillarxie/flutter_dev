@@ -6,8 +6,11 @@ import 'generated/api/core.dart' as api;
 import 'generated/build.dart' as build;
 import 'generated/frb_generated.dart';
 import 'generated/project.dart' as native_project;
+import 'generated/project_git.dart' as native_git;
 import 'generated/session.dart' as native;
 import 'generated/settings.dart' as settings;
+import 'generated/workspace.dart' as workspace;
+import 'generated/test_runner.dart' as testing;
 
 /// Converts native snapshots into the visible workbench projection.
 /// Processes, session transitions and all protocol requests remain owned by Rust.
@@ -111,6 +114,27 @@ class NativeWorkbenchBridge extends WorkbenchBridge {
     platforms: value.platforms,
   );
 
+  ProjectGitInfo _gitInfo(native_git.ProjectGitInfo value) => ProjectGitInfo(
+    repositoryRoot: value.repositoryRoot,
+    currentBranch: value.currentBranch,
+    headCommit: value.headCommit,
+    branches: value.branches,
+  );
+
+  @override
+  Future<ProjectGitInfo?> projectGitInfo(String projectPath) async {
+    final value = await api.projectGitInfo(projectPath: projectPath);
+    return value == null ? null : _gitInfo(value);
+  }
+
+  @override
+  Future<ProjectGitInfo> switchProjectBranch(
+    String projectPath,
+    String branch,
+  ) async => _gitInfo(
+    await api.switchProjectBranch(projectPath: projectPath, branch: branch),
+  );
+
   @override
   Future<Sdk> resolveSdk(String projectPath, String? explicitPath) async {
     final value = await api.resolveSdk(
@@ -142,6 +166,7 @@ class NativeWorkbenchBridge extends WorkbenchBridge {
   }
 
   AppSettings _appSettings(settings.AppSettings value) => AppSettings(
+    workspacePreferences: _preferences(value.workspacePreferences),
     defaultSdkPath: value.defaultSdkPath,
     themeMode: value.themeMode,
     projects: [for (final project in value.projects) _project(project)],
@@ -157,6 +182,168 @@ class NativeWorkbenchBridge extends WorkbenchBridge {
         ),
     ],
   );
+
+  RunProfile _profile(workspace.RunProfile p) => RunProfile(
+    id: p.id,
+    name: p.name,
+    projectPath: p.projectPath,
+    sdkPath: p.sdkPath,
+    deviceId: p.deviceId,
+    platform: p.platform,
+    entrypoint: p.entrypoint,
+    mode: p.mode,
+    flavor: p.flavor,
+    dartDefines: p.dartDefines,
+    environment: {for (final e in p.environment) e.name: e.value},
+    toolArgs: p.toolArgs,
+    attachUri: p.attachUri,
+    noDebug: p.noDebug,
+    environmentText: p.environmentText,
+    toolArgsText: p.toolArgsText,
+  );
+
+  workspace.RunProfile _nativeProfile(RunProfile p) => workspace.RunProfile(
+    id: p.id,
+    name: p.name,
+    projectPath: p.projectPath,
+    sdkPath: p.sdkPath,
+    deviceId: p.deviceId,
+    platform: p.platform,
+    entrypoint: p.entrypoint,
+    mode: p.mode,
+    flavor: p.flavor,
+    dartDefines: p.dartDefines,
+    environment: [
+      for (final e in p.environment.entries)
+        native.EnvVar(name: e.key, value: e.value),
+    ],
+    toolArgs: p.toolArgs,
+    attachUri: p.attachUri,
+    noDebug: p.noDebug,
+    environmentText: p.environmentText,
+    toolArgsText: p.toolArgsText,
+  );
+
+  WorkspacePreferences _preferences(workspace.WorkspacePreferences p) =>
+      WorkspacePreferences(
+        runProfiles: p.runProfiles.map(_profile).toList(),
+        editorExecutable: p.editorExecutable,
+        editorArguments: p.editorArguments,
+        projectStates: [
+          for (final s in p.projectStates)
+            ProjectRunState(
+              projectPath: s.projectPath,
+              draft: s.draft == null ? null : _profile(s.draft!),
+              lastRun: s.lastRun == null ? null : _profile(s.lastRun!),
+              selectedProfileId: s.selectedProfileId,
+              autoReload: s.autoReload,
+            ),
+        ],
+      );
+
+  @override
+  Future<AppSettings> setWorkspacePreferences(
+    WorkspacePreferences preferences,
+  ) async => _appSettings(
+    await api.setWorkspacePreferences(
+      preferences: workspace.WorkspacePreferences(
+        runProfiles: preferences.runProfiles.map(_nativeProfile).toList(),
+        editorExecutable: preferences.editorExecutable,
+        editorArguments: preferences.editorArguments,
+        projectStates: [
+          for (final s in preferences.projectStates)
+            workspace.ProjectRunState(
+              projectPath: s.projectPath,
+              draft: s.draft == null ? null : _nativeProfile(s.draft!),
+              lastRun: s.lastRun == null ? null : _nativeProfile(s.lastRun!),
+              selectedProfileId: s.selectedProfileId,
+              autoReload: s.autoReload,
+            ),
+        ],
+      ),
+    ),
+  );
+
+  @override
+  Future<void> openSourceLocation(
+    String projectPath,
+    String path,
+    int line,
+    int column,
+  ) => api.openSourceLocation(
+    projectPath: projectPath,
+    path: path,
+    line: line,
+    column: column,
+  );
+  @override
+  Future<List<String>> discoverTestFiles(String projectPath) =>
+      api.discoverTestFiles(projectPath: projectPath);
+
+  TestRunSnapshot _testSnapshot(testing.TestRunSnapshot s) => TestRunSnapshot(
+    id: s.id,
+    projectPath: s.projectPath,
+    state: s.state,
+    passed: s.passed,
+    failed: s.failed,
+    skipped: s.skipped,
+    exitCode: s.exitCode,
+    error: s.error,
+    tests: [
+      for (final t in s.tests)
+        TestResult(
+          id: t.id,
+          path: t.path,
+          name: t.name,
+          status: t.status,
+          error: t.error,
+          stackTrace: t.stackTrace,
+        ),
+    ],
+  );
+  @override
+  Future<TestRunSnapshot> startTestRun(TestRunConfig config) async =>
+      _testSnapshot(
+        await api.startTestRun(
+          config: testing.TestRunConfig(
+            projectPath: config.projectPath,
+            sdkPath: config.sdkPath,
+            selections: [
+              for (final s in config.selections)
+                testing.TestSelection(path: s.path, name: s.name),
+            ],
+          ),
+        ),
+      );
+  @override
+  Future<TestRunSnapshot> testRunSnapshot(String id) async =>
+      _testSnapshot(await api.testRunSnapshot(runId: id));
+  @override
+  Future<List<TestRunSnapshot>> listTestRuns() async =>
+      (await api.listTestRuns()).map(_testSnapshot).toList();
+  @override
+  Future<LogPage> readTestLogs(
+    String id, {
+    int afterId = 0,
+    int limit = 200,
+  }) async {
+    final page = await api.readTestLogs(
+      runId: id,
+      afterId: afterId,
+      limit: limit,
+    );
+    return LogPage(
+      entries: [
+        for (final e in page.entries)
+          LogEntry(id: e.id, category: e.category, text: e.text),
+      ],
+      nextAfterId: page.nextAfterId ?? afterId,
+      droppedBeforeId: page.droppedBeforeId ?? 0,
+    );
+  }
+
+  @override
+  Future<void> stopTestRun(String id) => api.stopTestRun(runId: id);
 
   @override
   Future<AppSettings> setWorkspaceProjects(
@@ -202,6 +389,18 @@ class NativeWorkbenchBridge extends WorkbenchBridge {
     outputDirectory: value.outputDirectory,
     error: value.error,
     exitCode: value.exitCode,
+    version: value.version == null ? null : _buildVersion(value.version!),
+  );
+
+  BuildVersion _buildVersion(build.BuildVersion value) =>
+      BuildVersion(buildName: value.buildName, buildNumber: value.buildNumber);
+
+  @override
+  Future<BuildVersion> readBuildVersion(
+    String projectPath,
+    List<String> args,
+  ) async => _buildVersion(
+    await api.readBuildVersion(projectPath: projectPath, args: args),
   );
 
   @override
@@ -216,6 +415,10 @@ class NativeWorkbenchBridge extends WorkbenchBridge {
       ),
     ),
   );
+
+  @override
+  Future<List<BuildSnapshot>> listBuilds() async =>
+      (await api.listBuilds()).map(_buildSnapshot).toList();
 
   @override
   Future<BuildSnapshot> buildSnapshot(String id) async =>

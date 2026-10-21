@@ -20,6 +20,8 @@ pub struct AppSettings {
     pub projects: Vec<crate::project::ProjectInfo>,
     #[serde(default)]
     pub selected_project_path: Option<String>,
+    #[serde(default)]
+    pub workspace_preferences: crate::workspace::WorkspacePreferences,
 }
 
 const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
@@ -37,6 +39,7 @@ impl Default for AppSettings {
             build_presets: crate::build::default_build_presets(),
             projects: vec![],
             selected_project_path: None,
+            workspace_preferences: Default::default(),
         }
     }
 }
@@ -77,6 +80,27 @@ pub async fn set_workspace_projects(
         set_workspace_projects_at(&destination, projects, selected_project_path)
     })
     .await?
+}
+
+pub async fn set_workspace_preferences(
+    preferences: crate::workspace::WorkspacePreferences,
+) -> Result<AppSettings> {
+    crate::workspace::validate(&preferences)?;
+    let _guard = SETTINGS_WRITE.get_or_init(|| Mutex::new(())).lock().await;
+    let destination = tokio::task::spawn_blocking(settings_path).await??;
+    tokio::task::spawn_blocking(move || set_workspace_preferences_at(&destination, preferences))
+        .await?
+}
+
+fn set_workspace_preferences_at(
+    destination: &Path,
+    preferences: crate::workspace::WorkspacePreferences,
+) -> Result<AppSettings> {
+    crate::workspace::validate(&preferences)?;
+    let mut settings = read_settings(destination)?;
+    settings.workspace_preferences = preferences;
+    write_settings(destination, &settings)?;
+    Ok(settings)
 }
 
 fn set_workspace_projects_at(
@@ -231,6 +255,34 @@ mod tests {
             entrypoint: "lib/alternate.dart".into(),
             platforms: vec!["android".into(), "web".into()],
         }
+    }
+
+    #[test]
+    fn preferences_round_trip_migrates_and_preserves_other_settings() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"default_sdk_path":"/sdk/flutter","theme_mode":"dark"}"#,
+        )
+        .unwrap();
+        let original = read_settings(&path).unwrap();
+        assert_eq!(original.workspace_preferences.editor_executable, "code");
+        let mut preferences = original.workspace_preferences.clone();
+        preferences.editor_executable = "/custom/editor".into();
+        preferences.editor_arguments = vec!["{file}".into(), "--line={line}".into()];
+        let saved = set_workspace_preferences_at(&path, preferences.clone()).unwrap();
+        assert_eq!(saved.workspace_preferences, preferences);
+        assert_eq!(saved.default_sdk_path, original.default_sdk_path);
+        assert_eq!(saved.theme_mode, original.theme_mode);
+        assert_eq!(saved.build_presets, original.build_presets);
+        assert_eq!(read_settings(&path).unwrap(), saved);
+        let themed = set_theme_mode_at(&path, "light".into()).unwrap();
+        assert_eq!(themed.workspace_preferences, preferences);
+        let before = fs::read(&path).unwrap();
+        preferences.editor_executable.clear();
+        assert!(set_workspace_preferences_at(&path, preferences).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]

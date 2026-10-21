@@ -4,14 +4,18 @@ import 'dart:ui' show AppExitResponse;
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/presentation/workbench_models.dart';
 import '../../core/presentation/workbench_select.dart';
 import '../build/build_dialog.dart';
+import '../build/build_tasks_dialog.dart';
 import '../debugger/debugger_panel.dart';
 import '../devtools/devtools_panel.dart';
 import '../logs/log_panel.dart';
 import '../settings/settings_page.dart';
+import '../testing/test_panel.dart';
+import 'run_profile_controls.dart';
 
 class Workbench extends StatefulWidget {
   const Workbench({
@@ -48,7 +52,14 @@ class _ProjectDraft {
   bool advancedExpanded = false;
   int deviceRequest = 0;
   int sdkRequest = 0;
+  ProjectGitInfo? git;
+  String? gitError;
+  bool gitLoading = false;
+  int gitRequest = 0;
   RunConfig? lastConfig;
+  RunProfile? lastProfile;
+  String? selectedProfileId;
+  bool autoReload = false, touched = false;
   void dispose() {
     for (final controller in [
       sdkPath,
@@ -65,6 +76,13 @@ class _ProjectDraft {
 }
 
 class _WorkbenchState extends State<Workbench> {
+  final _builds = ValueNotifier<List<BuildSnapshot>>([]);
+  Timer? _buildRefresh;
+  Future<void>? _buildRead;
+  int _buildRevision = 0;
+  final _pendingBuilds = <Future<BuildSnapshot>>{};
+  final _pendingSessionStarts = <Future<Session>>{};
+  bool _closing = false;
   final _sessions = ValueNotifier<List<Session>>([]);
   final _selected = ValueNotifier<Session?>(null);
   final _accepted = <String, (int, int)>{};
@@ -79,6 +97,7 @@ class _WorkbenchState extends State<Workbench> {
   Project? _errorProject;
   int _tab = 0;
   int _viewRevision = 0;
+  int _gitRevision = 0;
   bool _settingsOpen = false;
   Timer? _deviceRefresh;
   bool _workspaceLoaded = false, _workspaceReading = false;
@@ -87,6 +106,13 @@ class _WorkbenchState extends State<Workbench> {
   String? _workspaceError;
   late Future<void> _workspaceLoad;
   Future<void> _workspaceSave = Future<void>.value();
+  WorkspacePreferences _preferences = const WorkspacePreferences();
+  Future<void> _preferenceSave = Future<void>.value();
+  Timer? _preferenceTimer;
+  int _preferenceRevision = 0;
+  bool _preferenceDirty = false, _restoringDraft = false;
+  String? _preferenceError;
+  final _searchFocus = FocusNode();
   _ProjectDraft? get _draft =>
       _project == null ? null : _drafts[_project!.path];
 
@@ -101,6 +127,7 @@ class _WorkbenchState extends State<Workbench> {
     );
     _lifecycle = AppLifecycleListener(onExitRequested: _exit);
     _workspaceLoad = _readWorkspace();
+    unawaited(_refreshBuilds().catchError((Object _) {}));
     _perform('读取会话', () async {
       await _workspaceLoad;
       final sessions = await widget.bridge.listSessions();
@@ -112,12 +139,24 @@ class _WorkbenchState extends State<Workbench> {
   }
 
   Future<AppExitResponse> _exit() async {
-    if (_sessions.value.any((s) => s.active)) {
+    List<TestRunSnapshot> tests;
+    try {
+      tests = await widget.bridge.listTestRuns();
+    } catch (error) {
+      if (mounted) setState(() => _error = '读取后台测试失败，退出已取消：$error');
+      return AppExitResponse.cancel;
+    }
+    if (!mounted) return AppExitResponse.cancel;
+    if (_sessions.value.any((s) => s.active) ||
+        tests.any((run) => run.active) ||
+        _builds.value.any((build) => build.active) ||
+        _pendingSessionStarts.isNotEmpty ||
+        _pendingBuilds.isNotEmpty) {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('退出 Flutter Dev？'),
-          content: const Text('退出将停止本应用启动的会话并清理子进程。附加会话将解除连接。'),
+          content: const Text('退出将停止后台构建、测试和本应用启动的会话，并清理子进程。附加会话将解除连接。'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -125,7 +164,7 @@ class _WorkbenchState extends State<Workbench> {
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('停止会话并退出'),
+              child: const Text('停止任务并退出'),
             ),
           ],
         ),
@@ -133,6 +172,15 @@ class _WorkbenchState extends State<Workbench> {
       if (confirmed != true) return AppExitResponse.cancel;
     }
     try {
+      setState(() => _closing = true);
+      // A dismissed window may still be awaiting the native start response.
+      // Let those requests register before shutting down their owned processes.
+      await Future.wait([
+        for (final pending in _pendingBuilds.toList())
+          pending.then<void>((_) {}, onError: (Object _) {}),
+        for (final pending in _pendingSessionStarts.toList())
+          pending.then<void>((_) {}, onError: (Object _) {}),
+      ]);
       await _workspaceLoad;
       await _workspaceSave;
       if (_workspaceDirty) {
@@ -146,12 +194,76 @@ class _WorkbenchState extends State<Workbench> {
       }
       await _workspaceSave;
       if (_workspaceDirty) return AppExitResponse.cancel;
+      _preferenceTimer?.cancel();
+      if (_preferenceDirty) _queuePreferenceSave();
+      await _preferenceSave;
+      if (_preferenceDirty) return AppExitResponse.cancel;
       await widget.bridge.shutdown();
       return AppExitResponse.exit;
     } catch (e) {
       if (mounted) setState(() => _error = '退出清理失败：$e');
       return AppExitResponse.cancel;
+    } finally {
+      if (mounted) setState(() => _closing = false);
     }
+  }
+
+  Future<BuildSnapshot> _startBackgroundBuild(BuildConfig config) async {
+    if (_closing) throw StateError('应用正在退出，请稍后重试');
+    final pending = widget.bridge.startBuild(config);
+    _pendingBuilds.add(pending);
+    try {
+      final snapshot = await pending;
+      _buildStarted(snapshot);
+      return snapshot;
+    } finally {
+      _pendingBuilds.remove(pending);
+    }
+  }
+
+  Future<void> _refreshBuilds() {
+    return _buildRead ??= _loadBuilds().whenComplete(() => _buildRead = null);
+  }
+
+  Future<void> _loadBuilds() async {
+    final revision = _buildRevision;
+    try {
+      final builds = await widget.bridge.listBuilds();
+      if (mounted && revision == _buildRevision) _builds.value = builds;
+    } finally {
+      if (mounted && _builds.value.any((build) => build.active)) {
+        _scheduleBuildRefresh();
+      }
+    }
+  }
+
+  void _scheduleBuildRefresh() {
+    _buildRefresh?.cancel();
+    _buildRefresh = Timer(const Duration(seconds: 1), () {
+      if (mounted) unawaited(_refreshBuilds().catchError((Object _) {}));
+    });
+  }
+
+  void _buildStarted(BuildSnapshot snapshot) {
+    if (!mounted) return;
+    _buildRevision++;
+    _builds.value = [
+      snapshot,
+      ..._builds.value.where((build) => build.id != snapshot.id),
+    ];
+    _scheduleBuildRefresh();
+  }
+
+  Future<void> _openBuildTasks() async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => BuildTasksDialog(
+        bridge: widget.bridge,
+        builds: _builds,
+        onRefresh: _refreshBuilds,
+      ),
+    );
+    if (mounted) unawaited(_refreshBuilds().catchError((Object _) {}));
   }
 
   Future<void> _readWorkspace() async {
@@ -161,9 +273,14 @@ class _WorkbenchState extends State<Workbench> {
       final settings = await widget.bridge.getAppSettings();
       if (!mounted) return;
       setState(() {
+        _preferences = settings.workspacePreferences;
         // Merge rather than replace: imports made while the read was pending
         // remain in memory, and saved paths are retained even if unavailable.
         _addProjects(settings.projects);
+        for (final project in _projects) {
+          final draft = _drafts[project.path]!;
+          _restoreProjectPreferences(project, draft);
+        }
         if (selectionRevision == 0 &&
             selectionRevision == _workspaceSelectionRevision) {
           _project =
@@ -184,6 +301,7 @@ class _WorkbenchState extends State<Workbench> {
         _workspaceError = null;
       });
       if (_workspaceDirty) _queueWorkspaceSave();
+      if (_preferenceDirty) _queuePreferenceSave();
       _resolvePendingSdk();
     } catch (e) {
       if (mounted) setState(() => _workspaceError = '读取项目列表失败：$e');
@@ -266,7 +384,434 @@ class _WorkbenchState extends State<Workbench> {
       if (_projects.any((p) => p.path == project.path)) continue;
       _projects.add(project);
       _drafts[project.path] = _ProjectDraft(project);
+      final draft = _drafts[project.path]!;
+      _restoreProjectPreferences(project, draft);
+      for (final controller in [
+        draft.sdkPath,
+        draft.entrypoint,
+        draft.flavor,
+        draft.defines,
+        draft.environment,
+        draft.toolArgs,
+        draft.attachUri,
+      ]) {
+        controller.addListener(() => _draftChanged(draft));
+      }
+      unawaited(Future<void>.microtask(() => _refreshGit(project)));
     }
+  }
+
+  void _restoreProjectPreferences(Project project, _ProjectDraft draft) {
+    final saved = _preferences.projectStates
+        .where((s) => s.projectPath == project.path)
+        .firstOrNull;
+    if (saved == null) return;
+    draft.selectedProfileId = saved.selectedProfileId;
+    draft.autoReload = saved.autoReload;
+    draft.lastProfile = saved.lastRun;
+    draft.lastConfig = saved.lastRun == null
+        ? null
+        : _profileConfig(saved.lastRun!);
+    if (!draft.touched && saved.draft != null) {
+      _applyProfile(draft, saved.draft!);
+    }
+  }
+
+  void _applyProfile(_ProjectDraft draft, RunProfile profile) {
+    _restoringDraft = true;
+    try {
+      draft.sdkPath.text = profile.sdkPath ?? '';
+      draft.entrypoint.text = profile.entrypoint;
+      draft.flavor.text = profile.flavor ?? '';
+      draft.defines.text = profile.dartDefines.join('\n');
+      draft.environment.text =
+          profile.environmentText ??
+          profile.environment.entries
+              .map((e) => '${e.key}=${e.value}')
+              .join('\n');
+      draft.toolArgs.text =
+          profile.toolArgsText ??
+          (profile.toolArgs.isEmpty ? '' : jsonEncode(profile.toolArgs));
+      draft.attachUri.text = profile.attachUri ?? '';
+      draft.deviceId = profile.deviceId;
+      draft.platform = profile.platform;
+      draft.mode = profile.mode;
+      draft.noDebug = profile.noDebug;
+      draft.sdkRequest++;
+      draft.deviceRequest++;
+      draft.sdk = null;
+      draft.devices = [];
+      draft.emulators = [];
+    } finally {
+      _restoringDraft = false;
+    }
+  }
+
+  RunConfig _profileConfig(RunProfile p, {String? sdkPath}) => RunConfig(
+    sdkPath: sdkPath ?? p.sdkPath ?? '',
+    projectPath: p.projectPath,
+    deviceId: p.deviceId ?? '',
+    entrypoint: p.entrypoint,
+    mode: p.mode,
+    flavor: p.flavor,
+    attachUri: p.attachUri,
+    dartDefines: p.dartDefines,
+    env: p.environment,
+    toolArgs: p.toolArgs,
+    noDebug: p.noDebug,
+    sdkPreference: p.sdkPath ?? '',
+  );
+
+  RunProfile _captureProfile(
+    Project project,
+    _ProjectDraft draft, {
+    String id = 'draft',
+    String name = '当前草稿',
+    bool validate = false,
+  }) {
+    final env = <String, String>{};
+    List<String> args = [];
+    try {
+      for (final line
+          in draft.environment.text
+              .split('\n')
+              .where((s) => s.trim().isNotEmpty)) {
+        final equals = line.indexOf('=');
+        if (equals <= 0) throw const FormatException('环境变量应为每行 KEY=VALUE');
+        env[line.substring(0, equals).trim()] = line.substring(equals + 1);
+      }
+      if (draft.toolArgs.text.trim().isNotEmpty) {
+        final decoded = jsonDecode(draft.toolArgs.text);
+        if (decoded is! List || decoded.any((v) => v is! String)) {
+          throw const FormatException('工具参数应为 JSON 字符串数组');
+        }
+        args = decoded.cast<String>();
+      }
+    } on FormatException {
+      if (validate) rethrow;
+    }
+    return RunProfile(
+      id: id,
+      name: name,
+      projectPath: project.path,
+      sdkPath: draft.sdkPath.text.trim().isEmpty
+          ? null
+          : draft.sdkPath.text.trim(),
+      deviceId: draft.deviceId,
+      platform: draft.platform,
+      entrypoint: draft.entrypoint.text.trim(),
+      mode: draft.mode,
+      flavor: draft.flavor.text.trim().isEmpty
+          ? null
+          : draft.flavor.text.trim(),
+      dartDefines: draft.defines.text
+          .split('\n')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList(),
+      environment: env,
+      toolArgs: args,
+      noDebug: draft.noDebug,
+      attachUri: draft.attachUri.text.trim().isEmpty
+          ? null
+          : draft.attachUri.text.trim(),
+      environmentText: draft.environment.text,
+      toolArgsText: draft.toolArgs.text,
+    );
+  }
+
+  void _draftChanged(_ProjectDraft draft) {
+    if (_restoringDraft) return;
+    draft.touched = true;
+    _preferenceDirty = true;
+    _preferenceRevision++;
+    _preferenceTimer?.cancel();
+    _preferenceTimer = Timer(
+      const Duration(milliseconds: 400),
+      _queuePreferenceSave,
+    );
+  }
+
+  WorkspacePreferences _preferenceSnapshot() => WorkspacePreferences(
+    runProfiles: List.unmodifiable(_preferences.runProfiles),
+    editorExecutable: _preferences.editorExecutable,
+    editorArguments: List.unmodifiable(_preferences.editorArguments),
+    projectStates: [
+      ..._preferences.projectStates.where(
+        (s) => !_drafts.containsKey(s.projectPath),
+      ),
+      for (final project in _projects)
+        ProjectRunState(
+          projectPath: project.path,
+          draft: _captureProfile(project, _drafts[project.path]!),
+          lastRun: _drafts[project.path]!.lastProfile,
+          selectedProfileId: _drafts[project.path]!.selectedProfileId,
+          autoReload: _drafts[project.path]!.autoReload,
+        ),
+    ],
+  );
+
+  Future<bool> _queuePreferenceSave() {
+    if (!_workspaceLoaded || !_preferenceDirty) {
+      return Future.value(!_preferenceDirty);
+    }
+    final completion = Completer<bool>();
+    final revision = _preferenceRevision;
+    final snapshot = _preferenceSnapshot();
+    _preferences = snapshot;
+    _preferenceSave = _preferenceSave.then((_) async {
+      try {
+        await widget.bridge.setWorkspacePreferences(snapshot);
+        if (revision == _preferenceRevision) {
+          _preferenceDirty = false;
+          if (mounted) setState(() => _preferenceError = null);
+        }
+        completion.complete(true);
+      } catch (error) {
+        if (mounted && revision == _preferenceRevision) {
+          setState(() => _preferenceError = '运行配置保存失败：$error');
+        }
+        completion.complete(false);
+      }
+    });
+    return completion.future;
+  }
+
+  Future<void> _saveEditor(String executable, List<String> arguments) async {
+    if (!_workspaceLoaded) throw StateError('请先重新读取工作台设置');
+    _preferences = WorkspacePreferences(
+      runProfiles: _preferences.runProfiles,
+      projectStates: _preferences.projectStates,
+      editorExecutable: executable,
+      editorArguments: arguments,
+    );
+    _preferenceDirty = true;
+    _preferenceRevision++;
+    if (!await _queuePreferenceSave()) {
+      throw StateError(_preferenceError ?? '设置尚未保存');
+    }
+  }
+
+  Future<void> _selectProfile(
+    Project project,
+    _ProjectDraft draft,
+    String id,
+  ) async {
+    if (id.isNotEmpty) {
+      final profile = _preferences.runProfiles
+          .where((p) => p.projectPath == project.path && p.id == id)
+          .firstOrNull;
+      if (profile == null) return;
+      setState(() => _applyProfile(draft, profile));
+    }
+    setState(() => draft.selectedProfileId = id.isEmpty ? null : id);
+    _draftChanged(draft);
+    _pendingSdkProject = draft.sdk == null ? project : null;
+    _resolvePendingSdk();
+  }
+
+  Future<void> _manageProfile(
+    Project project,
+    _ProjectDraft draft,
+    String action,
+  ) async {
+    try {
+      final current = _preferences.runProfiles
+          .where(
+            (p) =>
+                p.id == draft.selectedProfileId &&
+                p.projectPath == project.path,
+          )
+          .firstOrNull;
+      if (action != 'save-as' && current == null) return;
+      if (action == 'delete') {
+        setState(() {
+          _preferences = WorkspacePreferences(
+            runProfiles: _preferences.runProfiles
+                .where((p) => p != current)
+                .toList(),
+            projectStates: _preferences.projectStates,
+            editorExecutable: _preferences.editorExecutable,
+            editorArguments: _preferences.editorArguments,
+          );
+          draft.selectedProfileId = null;
+        });
+      } else {
+        var name = current?.name ?? '';
+        if (action == 'save-as' || action == 'rename') {
+          final result = await showDialog<String>(
+            context: context,
+            builder: (_) => RunProfileNameDialog(
+              initialName: action == 'rename' ? name : '新运行配置',
+              title: action == 'rename' ? '重命名运行配置' : '保存运行配置',
+            ),
+          );
+          if (!mounted || result == null) return;
+          name = result;
+        }
+        final id = action == 'save-as'
+            ? 'profile-${DateTime.now().microsecondsSinceEpoch}'
+            : current!.id;
+        final profile = action == 'rename'
+            ? RunProfile(
+                id: id,
+                name: name,
+                projectPath: current!.projectPath,
+                sdkPath: current.sdkPath,
+                deviceId: current.deviceId,
+                platform: current.platform,
+                entrypoint: current.entrypoint,
+                mode: current.mode,
+                flavor: current.flavor,
+                dartDefines: current.dartDefines,
+                environment: current.environment,
+                toolArgs: current.toolArgs,
+                attachUri: current.attachUri,
+                noDebug: current.noDebug,
+                environmentText: current.environmentText,
+                toolArgsText: current.toolArgsText,
+              )
+            : _captureProfile(
+                project,
+                draft,
+                id: id,
+                name: name,
+                validate: true,
+              );
+        setState(() {
+          _preferences = WorkspacePreferences(
+            runProfiles: [
+              ..._preferences.runProfiles.where(
+                (p) => !(p.projectPath == project.path && p.id == id),
+              ),
+              profile,
+            ],
+            projectStates: _preferences.projectStates,
+            editorExecutable: _preferences.editorExecutable,
+            editorArguments: _preferences.editorArguments,
+          );
+          draft.selectedProfileId = id;
+        });
+      }
+      _draftChanged(draft);
+      _preferenceTimer?.cancel();
+      _queuePreferenceSave();
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    }
+  }
+
+  Future<void> _refreshGit(Project project) async {
+    if (!mounted) return;
+    final draft = _drafts[project.path]!;
+    final request = ++_gitRevision;
+    draft.gitRequest = request;
+    setState(() {
+      draft.gitLoading = true;
+      draft.gitError = null;
+    });
+    try {
+      final info = await widget.bridge.projectGitInfo(project.path);
+      if (!mounted || request != draft.gitRequest) return;
+      setState(() {
+        draft.git = info;
+        if (info != null) {
+          for (final sibling in _drafts.values) {
+            if (identical(sibling, draft) ||
+                sibling.git?.repositoryRoot != info.repositoryRoot ||
+                sibling.gitRequest > request) {
+              continue;
+            }
+            sibling.gitRequest = request;
+            sibling.git = info;
+            sibling.gitLoading = false;
+            sibling.gitError = null;
+          }
+        }
+      });
+    } catch (error) {
+      if (mounted && request == draft.gitRequest) {
+        setState(() => draft.gitError = '读取 Git 分支失败：$error');
+      }
+    } finally {
+      if (mounted && request == draft.gitRequest) {
+        setState(() => draft.gitLoading = false);
+      }
+    }
+  }
+
+  Future<void> _switchBranch(Project project, String branch) async {
+    final draft = _drafts[project.path]!;
+    final git = draft.git;
+    if (_busy != null ||
+        draft.gitLoading ||
+        git == null ||
+        branch == git.currentBranch) {
+      return;
+    }
+    final related = _projects
+        .where(
+          (p) => _drafts[p.path]!.git?.repositoryRoot == git.repositoryRoot,
+        )
+        .toList();
+    // Invalidate reads already in flight for every known project in this
+    // checkout. A late pre-switch result must not restore the old branch.
+    setState(() {
+      for (final item in related) {
+        final state = _drafts[item.path]!;
+        state.gitRequest = ++_gitRevision;
+        state.gitLoading = true;
+        state.gitError = null;
+      }
+    });
+    await _perform('切换分支', () async {
+      try {
+        final info = await widget.bridge.switchProjectBranch(
+          project.path,
+          branch,
+        );
+        if (!mounted) return;
+        for (final item in _projects) {
+          if (!related.contains(item) &&
+              _drafts[item.path]!.git?.repositoryRoot == info.repositoryRoot) {
+            related.add(item);
+          }
+        }
+        setState(() {
+          for (final item in related) {
+            final state = _drafts[item.path]!;
+            state.gitRequest = ++_gitRevision;
+            state.git = info;
+            state.sdkRequest++;
+            state.deviceRequest++;
+            state.sdk = null;
+            state.devices = [];
+            state.emulators = [];
+            state.deviceId = null;
+          }
+        });
+        if (!_settingsOpen &&
+            _selected.value == null &&
+            related.any((p) => p.path == _project?.path)) {
+          _pendingSdkProject = _project;
+        }
+        // A sibling package's initial detection may still be pending. Restart
+        // those reads too, so it discovers the new HEAD of this checkout.
+        for (final item in _projects) {
+          if (_drafts[item.path]!.git == null) unawaited(_refreshGit(item));
+        }
+      } catch (error) {
+        if (mounted) setState(() => draft.gitError = '切换 Git 分支失败：$error');
+      } finally {
+        if (mounted) {
+          setState(() {
+            for (final item in related) {
+              _drafts[item.path]!.gitLoading = false;
+            }
+          });
+        }
+      }
+    });
   }
 
   void _upsert(Session session) {
@@ -345,13 +890,16 @@ class _WorkbenchState extends State<Workbench> {
     _selected.value = null;
     _workspaceChanged();
     final draft = _drafts[project.path]!;
+    if (!draft.gitLoading && _busy != '切换分支') {
+      unawaited(_refreshGit(project));
+    }
     _pendingSdkProject = draft.sdk == null ? project : null;
     _resolvePendingSdk();
   }
 
   void _resolvePendingSdk() {
     final project = _pendingSdkProject;
-    if (_busy != null || project == null) return;
+    if (_closing || _busy != null || project == null) return;
     _pendingSdkProject = null;
     final draft = _drafts[project.path]!;
     if (draft.sdk == null) {
@@ -408,7 +956,6 @@ class _WorkbenchState extends State<Workbench> {
       draft.sdk = null;
       draft.devices = [];
       draft.emulators = [];
-      draft.deviceId = null;
     });
     final sdk = await widget.bridge.resolveSdk(
       project.path,
@@ -467,44 +1014,8 @@ class _WorkbenchState extends State<Workbench> {
   }
 
   RunConfig _readConfig(Project project, _ProjectDraft draft) {
-    final env = <String, String>{};
-    for (final line
-        in draft.environment.text
-            .split('\n')
-            .where((s) => s.trim().isNotEmpty)) {
-      final equals = line.indexOf('=');
-      if (equals <= 0) throw const FormatException('环境变量应为每行 KEY=VALUE');
-      env[line.substring(0, equals).trim()] = line.substring(equals + 1);
-    }
-    List<String> args = [];
-    if (draft.toolArgs.text.trim().isNotEmpty) {
-      final decoded = jsonDecode(draft.toolArgs.text);
-      if (decoded is! List || decoded.any((v) => v is! String)) {
-        throw const FormatException('工具参数应为 JSON 字符串数组');
-      }
-      args = decoded.cast<String>();
-    }
-    return RunConfig(
-      sdkPath: draft.sdk!.path,
-      projectPath: project.path,
-      deviceId: draft.deviceId!,
-      entrypoint: draft.entrypoint.text.trim(),
-      mode: draft.mode,
-      flavor: draft.flavor.text.trim().isEmpty
-          ? null
-          : draft.flavor.text.trim(),
-      attachUri: draft.attachUri.text.trim().isEmpty
-          ? null
-          : draft.attachUri.text.trim(),
-      dartDefines: draft.defines.text
-          .split('\n')
-          .map((v) => v.trim())
-          .where((v) => v.isNotEmpty)
-          .toList(),
-      env: env,
-      toolArgs: args,
-      noDebug: draft.noDebug,
-    );
+    final profile = _captureProfile(project, draft, validate: true);
+    return _profileConfig(profile, sdkPath: draft.sdk!.path);
   }
 
   Future<void> _start(
@@ -512,6 +1023,7 @@ class _WorkbenchState extends State<Workbench> {
     _ProjectDraft draft, {
     bool quick = false,
   }) {
+    if (_closing) return Future<void>.value();
     final revision = _viewRevision;
     return _perform('启动会话', () async {
       final submitted = quick ? draft.lastConfig! : _readConfig(project, draft);
@@ -538,7 +1050,36 @@ class _WorkbenchState extends State<Workbench> {
         sdkPreference: preference,
       );
       draft.lastConfig = config;
-      final session = await widget.bridge.startSession(config);
+      draft.lastProfile = RunProfile(
+        id: 'last-run',
+        name: '上次启动',
+        projectPath: config.projectPath,
+        sdkPath: preference.isEmpty ? null : preference,
+        deviceId: config.deviceId,
+        entrypoint: config.entrypoint,
+        mode: config.mode,
+        flavor: config.flavor,
+        dartDefines: config.dartDefines,
+        environment: config.env,
+        toolArgs: config.toolArgs,
+        attachUri: config.attachUri,
+        noDebug: config.noDebug,
+        platform: draft.platform,
+      );
+      _draftChanged(draft);
+      _preferenceTimer?.cancel();
+      if (!await _queuePreferenceSave()) {
+        throw StateError(_preferenceError ?? '运行配置尚未保存');
+      }
+      if (!mounted || _closing) return;
+      final pending = widget.bridge.startSession(config);
+      _pendingSessionStarts.add(pending);
+      late Session session;
+      try {
+        session = await pending;
+      } finally {
+        _pendingSessionStarts.remove(pending);
+      }
       if (!mounted) return;
       _upsert(session);
       if (_viewRevision == revision) {
@@ -584,67 +1125,274 @@ class _WorkbenchState extends State<Workbench> {
   void dispose() {
     _subscription?.cancel();
     _deviceRefresh?.cancel();
+    _buildRefresh?.cancel();
+    _preferenceTimer?.cancel();
+    _searchFocus.dispose();
     _lifecycle.dispose();
     for (final draft in _drafts.values) {
       draft.dispose();
     }
     _sessions.dispose();
+    _builds.dispose();
     _selected.dispose();
     super.dispose();
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: SafeArea(
-      child: Column(
-        children: [
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) => Row(
-                children: [
-                  SizedBox(
-                    width: constraints.maxWidth < 760 ? 180 : 248,
-                    child: _sidebar(),
-                  ),
-                  Expanded(
-                    child: ValueListenableBuilder<Session?>(
-                      valueListenable: _selected,
-                      builder: (context, session, _) => Column(
-                        children: [
-                          _workspaceHeader(session),
-                          if (_busy != null)
-                            const LinearProgressIndicator(minHeight: 2),
-                          if (_error != null) _errorBanner(),
-                          if (_workspaceError != null) _workspaceErrorBanner(),
-                          Expanded(
-                            child: _settingsOpen
-                                ? SettingsPage(
-                                    bridge: widget.bridge,
-                                    themeMode: widget.themeMode,
-                                    onThemeChanged: widget.onThemeChanged,
-                                    onSaved: _settingsSaved,
-                                  )
-                                : session == null
-                                ? _configuration()
-                                : Column(
-                                    key: const ValueKey('session-workspace'),
+  Widget build(BuildContext context) => CallbackShortcuts(
+    bindings: _shortcuts,
+    child: Focus(
+      autofocus: true,
+      child: Scaffold(
+        body: SafeArea(
+          child: Column(
+            children: [
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Row(
+                    children: [
+                      SizedBox(
+                        width: constraints.maxWidth < 760 ? 180 : 248,
+                        child: _sidebar(),
+                      ),
+                      Expanded(
+                        child: ValueListenableBuilder<Session?>(
+                          valueListenable: _selected,
+                          builder: (context, session, _) => Column(
+                            children: [
+                              _workspaceHeader(session),
+                              if (_busy != null)
+                                const LinearProgressIndicator(minHeight: 2),
+                              if (_error != null) _errorBanner(),
+                              if (_workspaceError != null)
+                                _workspaceErrorBanner(),
+                              if (_preferenceError != null)
+                                Material(
+                                  color: _colors.errorContainer,
+                                  child: Row(
                                     children: [
-                                      _tabs(),
-                                      Expanded(child: _panel(session)),
+                                      Expanded(
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(8),
+                                          child: Text(
+                                            _preferenceError!,
+                                            style: const TextStyle(
+                                              fontSize: 12,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      TextButton(
+                                        onPressed: _queuePreferenceSave,
+                                        child: const Text('重试保存'),
+                                      ),
                                     ],
                                   ),
+                                ),
+                              Expanded(
+                                child: _settingsOpen
+                                    ? SettingsPage(
+                                        bridge: widget.bridge,
+                                        themeMode: widget.themeMode,
+                                        onThemeChanged: widget.onThemeChanged,
+                                        onSaved: _settingsSaved,
+                                        onEditorSaved: _saveEditor,
+                                      )
+                                    : session == null
+                                    ? _configuration()
+                                    : Column(
+                                        key: const ValueKey(
+                                          'session-workspace',
+                                        ),
+                                        children: [
+                                          _tabs(),
+                                          Expanded(child: _panel(session)),
+                                        ],
+                                      ),
+                              ),
+                            ],
                           ),
-                        ],
+                        ),
                       ),
-                    ),
+                    ],
                   ),
-                ],
+                ),
               ),
+              _status(),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
+
+  Map<ShortcutActivator, VoidCallback> get _shortcuts => {
+    const SingleActivator(LogicalKeyboardKey.f5): () {
+      final session = _selected.value;
+      if (session?.state == 'paused' &&
+          _busy == null &&
+          session!.capabilities['debugger'] == true) {
+        unawaited(_pause(session));
+      } else if (session == null &&
+          !_settingsOpen &&
+          _project != null &&
+          _draft != null &&
+          _canRun(_project!, _draft!)) {
+        unawaited(_start(_project!, _draft!));
+      }
+    },
+    const SingleActivator(LogicalKeyboardKey.f5, shift: true): () {
+      final session = _selected.value;
+      if (session?.canStop == true && _busy == null) {
+        unawaited(
+          _perform('停止会话', () => widget.bridge.stopSession(session!.id)),
+        );
+      }
+    },
+    for (final meta in [false, true]) ...{
+      SingleActivator(
+        LogicalKeyboardKey.keyR,
+        meta: meta,
+        control: !meta,
+      ): () =>
+          _shortcutReload(false),
+      SingleActivator(
+        LogicalKeyboardKey.keyR,
+        meta: meta,
+        control: !meta,
+        shift: true,
+      ): () =>
+          _shortcutReload(true),
+      SingleActivator(LogicalKeyboardKey.keyF, meta: meta, control: !meta): () {
+        if (_searchFocus.context != null) _searchFocus.requestFocus();
+      },
+      SingleActivator(
+        LogicalKeyboardKey.arrowDown,
+        meta: meta,
+        control: !meta,
+        alt: true,
+      ): () =>
+          _cycleProject(1),
+      SingleActivator(
+        LogicalKeyboardKey.arrowUp,
+        meta: meta,
+        control: !meta,
+        alt: true,
+      ): () =>
+          _cycleProject(-1),
+    },
+    const SingleActivator(LogicalKeyboardKey.tab, control: true): () =>
+        _cycleSession(1),
+    const SingleActivator(
+      LogicalKeyboardKey.tab,
+      control: true,
+      shift: true,
+    ): () =>
+        _cycleSession(-1),
+    for (final entry in [
+      LogicalKeyboardKey.digit1,
+      LogicalKeyboardKey.digit2,
+      LogicalKeyboardKey.digit3,
+      LogicalKeyboardKey.digit4,
+    ].indexed)
+      for (final meta in [false, true])
+        SingleActivator(entry.$2, meta: meta, control: !meta): () {
+          if (_selected.value != null) setState(() => _tab = entry.$1);
+        },
+  };
+
+  void _shortcutReload(bool restart) {
+    final session = _selected.value;
+    final capability = restart ? 'supportsHotRestart' : 'supportsHotReload';
+    if (_closing ||
+        _busy != null ||
+        session?.canReload != true ||
+        session!.capabilities[capability] != true) {
+      return;
+    }
+    unawaited(
+      _perform(
+        restart ? '热重启' : '热重载',
+        () => restart
+            ? widget.bridge.restart(session.id)
+            : widget.bridge.reload(session.id),
+      ),
+    );
+  }
+
+  void _cycleProject(int delta) {
+    if (_projects.isEmpty) return;
+    final index = _projects.indexWhere((p) => p.path == _project?.path);
+    _selectProject(_projects[(index + delta) % _projects.length]);
+  }
+
+  void _cycleSession(int delta) {
+    if (_sessions.value.isEmpty) return;
+    final index = _sessions.value.indexWhere(
+      (s) => s.id == _selected.value?.id,
+    );
+    _selectSession(_sessions.value[(index + delta) % _sessions.value.length]);
+  }
+
+  Future<void> _openTests(Project project, _ProjectDraft draft) =>
+      showDialog<void>(
+        context: context,
+        builder: (context) => Dialog(
+          child: SizedBox(
+            width: 1000,
+            height: MediaQuery.sizeOf(context).height * .85,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${project.name} · 测试',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '关闭测试面板',
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: TestPanel(
+                    bridge: widget.bridge,
+                    project: project,
+                    sdkPreference: draft.sdkPath.text.trim().isEmpty
+                        ? null
+                        : draft.sdkPath.text.trim(),
+                  ),
+                ),
+              ],
             ),
           ),
-          _status(),
-        ],
+        ),
+      );
+
+  void _showShortcuts() => showDialog<void>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('快捷键'),
+      content: const SingleChildScrollView(
+        child: Text(
+          'F5  启动 / 继续\nShift + F5  停止会话\n⌘ / Ctrl + R  热重载\n⌘ / Ctrl + Shift + R  热重启\n⌘ / Ctrl + F  搜索当前日志 / 网络\n⌘ / Ctrl + Alt + ↑ / ↓  切换项目\nCtrl + Tab / Ctrl + Shift + Tab  切换会话\n⌘ / Ctrl + 1–4  切换会话页签',
+          style: TextStyle(fontSize: 13, height: 2),
+        ),
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('知道了'),
+        ),
+      ],
     ),
   );
 
@@ -764,6 +1512,41 @@ class _WorkbenchState extends State<Workbench> {
                       ],
                     ),
             ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+          child: ValueListenableBuilder<List<BuildSnapshot>>(
+            valueListenable: _builds,
+            builder: (context, builds, _) {
+              final active = builds.where((build) => build.active).length;
+              return TextButton(
+                key: const ValueKey('build-tasks'),
+                onPressed: _openBuildTasks,
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 13,
+                  ),
+                  foregroundColor: _colors.onSurfaceVariant,
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.inventory_2_outlined, size: 19),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text('构建任务', style: TextStyle(fontSize: 13)),
+                    ),
+                    if (active > 0)
+                      Text(
+                        '$active',
+                        key: const ValueKey('active-build-count'),
+                        style: TextStyle(color: _colors.primary, fontSize: 12),
+                      ),
+                  ],
+                ),
+              );
+            },
           ),
         ),
         Padding(
@@ -888,17 +1671,50 @@ class _WorkbenchState extends State<Workbench> {
               onTap: () => _selectProject(project),
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 13),
-                child: Tooltip(
-                  message: project.path,
-                  child: Text(
-                    project.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Tooltip(
+                      message: project.path,
+                      child: Text(
+                        project.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                  ),
+                    if (draft.git case final git?) ...[
+                      const SizedBox(height: 4),
+                      Tooltip(
+                        message: git.label,
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.account_tree_outlined,
+                              size: 12,
+                              color: _colors.onSurfaceVariant,
+                            ),
+                            const SizedBox(width: 4),
+                            Expanded(
+                              child: Text(
+                                git.label,
+                                key: ValueKey('project-branch-${project.path}'),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: _colors.onSurfaceVariant,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),
@@ -998,82 +1814,78 @@ class _WorkbenchState extends State<Workbench> {
       final compact = constraints.maxWidth < 760;
       final project = _project;
       final draft = _draft;
+      final stackActions =
+          constraints.maxWidth < 520 && !_settingsOpen && session == null;
       return Container(
         key: const ValueKey('workspace-header'),
         padding: EdgeInsets.symmetric(
           horizontal: compact ? 18 : 28,
           vertical: 24,
         ),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    _settingsOpen ? '应用设置' : _project?.name ?? '工作台',
-                    key: const ValueKey('workspace-title'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: compact ? 22 : 27,
-                      letterSpacing: -0.6,
-                      fontWeight: FontWeight.w600,
-                    ),
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _settingsOpen ? '应用设置' : _project?.name ?? '工作台',
+                        key: const ValueKey('workspace-title'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: compact ? 22 : 27,
+                          letterSpacing: -0.6,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (_settingsOpen || session != null) ...[
+                        const SizedBox(height: 7),
+                        Text(
+                          _settingsOpen
+                              ? '个性化工作台与开发环境'
+                              : '${_sessionDevice(session!)} · ${session.mode}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: _colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                  const SizedBox(height: 7),
-                  Text(
-                    _settingsOpen
-                        ? '个性化工作台与开发环境'
-                        : session == null
-                        ? '启动配置'
-                        : '${_sessionDevice(session)} · ${session.mode}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: _colors.onSurfaceVariant,
-                    ),
-                  ),
+                ),
+                if (!_settingsOpen && session != null) ...[
+                  const SizedBox(width: 12),
+                  _sessionActions(session, compact: compact),
                 ],
-              ),
+                if (!_settingsOpen &&
+                    session == null &&
+                    project != null &&
+                    draft != null &&
+                    !stackActions) ...[
+                  const SizedBox(width: 12),
+                  _projectActions(project, draft),
+                ],
+              ],
             ),
-            if (!_settingsOpen && session != null) ...[
-              const SizedBox(width: 12),
-              _sessionActions(session, compact: compact),
-            ],
             if (!_settingsOpen &&
                 session == null &&
                 project != null &&
-                draft != null) ...[
-              const SizedBox(width: 12),
-              FilledButton.icon(
-                key: const ValueKey('run-project'),
-                onPressed: _canRun(project, draft)
-                    ? () => _start(project, draft)
-                    : null,
-                icon: const Icon(Icons.play_arrow_rounded, size: 20),
-                label: const Text('启动会话'),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton.icon(
-                key: const ValueKey('build-project'),
-                onPressed: _busy == null
-                    ? () => showDialog<void>(
-                        context: context,
-                        barrierDismissible: false,
-                        builder: (_) => BuildDialog(
-                          bridge: widget.bridge,
-                          project: project,
-                          sdkPreference: draft.sdkPath.text.trim().isEmpty
-                              ? null
-                              : draft.sdkPath.text.trim(),
-                        ),
-                      )
-                    : null,
-                icon: const Icon(Icons.inventory_2_outlined, size: 18),
-                label: const Text('构建'),
-              ),
+                draft != null &&
+                (draft.git != null ||
+                    draft.gitLoading ||
+                    draft.gitError != null)) ...[
+              const SizedBox(height: 4),
+              _gitControls(project, draft),
+            ],
+            if (stackActions && project != null && draft != null) ...[
+              const SizedBox(height: 10),
+              _projectActions(project, draft),
             ],
           ],
         ),
@@ -1081,8 +1893,47 @@ class _WorkbenchState extends State<Workbench> {
     },
   );
 
+  Widget _projectActions(Project project, _ProjectDraft draft) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      FilledButton.icon(
+        key: const ValueKey('run-project'),
+        onPressed: _canRun(project, draft)
+            ? () => _start(project, draft)
+            : null,
+        icon: const Icon(Icons.play_arrow_rounded, size: 20),
+        label: const Text('启动会话'),
+      ),
+      const SizedBox(width: 8),
+      OutlinedButton.icon(
+        key: const ValueKey('build-project'),
+        onPressed: _busy == null && !_closing
+            ? () => showDialog<void>(
+                context: context,
+                builder: (_) => BuildDialog(
+                  bridge: widget.bridge,
+                  project: project,
+                  startBuild: _startBackgroundBuild,
+                  sdkPreference: draft.sdkPath.text.trim().isEmpty
+                      ? null
+                      : draft.sdkPath.text.trim(),
+                ),
+              )
+            : null,
+        icon: const Icon(Icons.inventory_2_outlined, size: 18),
+        label: const Text('构建'),
+      ),
+      IconButton(
+        key: const ValueKey('test-project'),
+        tooltip: '运行项目测试',
+        onPressed: _closing ? null : () => _openTests(project, draft),
+        icon: const Icon(Icons.science_outlined, size: 19),
+      ),
+    ],
+  );
+
   Widget _sessionActions(Session session, {required bool compact}) {
-    final idle = _busy == null && session.operation == null;
+    final idle = !_closing && _busy == null && session.operation == null;
     final canPause =
         idle &&
         session.mode == 'debug' &&
@@ -1311,6 +2162,40 @@ class _WorkbenchState extends State<Workbench> {
                 style: TextStyle(fontSize: 12, color: _colors.onSurfaceVariant),
               ),
               const SizedBox(height: 20),
+              RunProfileControls(
+                profiles: _preferences.runProfiles
+                    .where((p) => p.projectPath == project.path)
+                    .toList(),
+                selectedId: draft.selectedProfileId,
+                enabled: _workspaceLoaded && !_closing && _busy == null,
+                onSelected: (id) => _selectProfile(project, draft, id),
+                onSaveAs: () => _manageProfile(project, draft, 'save-as'),
+                onAction: (action) => _manageProfile(project, draft, action),
+                autoReload: draft.autoReload,
+                onAutoReload: (value) {
+                  setState(() => draft.autoReload = value);
+                  _draftChanged(draft);
+                },
+              ),
+              const SizedBox(height: 12),
+              if (draft.git != null && draft.git!.headCommit == null) ...[
+                Text(
+                  '仓库尚无提交，创建首次提交后可切换分支。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _colors.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              if (draft.gitError case final error?) ...[
+                Text(
+                  error,
+                  key: ValueKey('git-error-${project.path}'),
+                  style: TextStyle(fontSize: 12, color: _colors.error),
+                ),
+                const SizedBox(height: 12),
+              ],
               _configSection('运行目标', '选择平台、设备与运行模式。', [
                 Row(
                   children: [
@@ -1340,6 +2225,7 @@ class _WorkbenchState extends State<Workbench> {
                           onChanged: (p) => setState(() {
                             draft.platform = p == '' ? null : p;
                             _pickAvailableDevice(project, draft);
+                            _draftChanged(draft);
                           }),
                         ),
                       ),
@@ -1372,8 +2258,10 @@ class _WorkbenchState extends State<Workbench> {
                               icon: Icons.rocket_launch_outlined,
                             ),
                           ],
-                          onChanged: (mode) =>
-                              setState(() => draft.mode = mode),
+                          onChanged: (mode) => setState(() {
+                            draft.mode = mode;
+                            _draftChanged(draft);
+                          }),
                         ),
                       ),
                     ),
@@ -1547,7 +2435,10 @@ class _WorkbenchState extends State<Workbench> {
                     contentPadding: EdgeInsets.zero,
                     title: const Text('运行而不调试'),
                     value: draft.noDebug,
-                    onChanged: (v) => setState(() => draft.noDebug = v),
+                    onChanged: (v) => setState(() {
+                      draft.noDebug = v;
+                      _draftChanged(draft);
+                    }),
                   ),
                 ]),
               ],
@@ -1563,7 +2454,68 @@ class _WorkbenchState extends State<Workbench> {
     );
   }
 
+  Widget _gitControls(Project project, _ProjectDraft draft) {
+    final git = draft.git;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: git == null
+                ? Text(
+                    draft.gitLoading ? '正在识别 Git 仓库…' : 'Git 分支读取失败',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _colors.onSurfaceVariant,
+                    ),
+                  )
+                : WorkbenchSelect<String>(
+                    key: ValueKey('git-branch-select-${project.path}'),
+                    compact: true,
+                    label: '当前分支',
+                    value: git.currentBranch,
+                    hint: git.label,
+                    options: [
+                      for (final branch in git.branches)
+                        WorkbenchOption(
+                          value: branch,
+                          label: branch,
+                          icon: Icons.account_tree_outlined,
+                        ),
+                    ],
+                    onChanged: _busy == null && !draft.gitLoading
+                        ? (branch) => _switchBranch(project, branch)
+                        : null,
+                  ),
+          ),
+          const SizedBox(width: 4),
+          IconButton(
+            key: ValueKey('git-refresh-${project.path}'),
+            tooltip: '刷新 Git 分支',
+            constraints: const BoxConstraints.tightFor(width: 28, height: 28),
+            padding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            onPressed: _busy == null && !draft.gitLoading
+                ? () => _refreshGit(project)
+                : null,
+            icon: draft.gitLoading
+                ? const SizedBox(
+                    width: 12,
+                    height: 12,
+                    child: CircularProgressIndicator(strokeWidth: 1.5),
+                  )
+                : const Icon(Icons.refresh, size: 15),
+          ),
+        ],
+      ),
+    );
+  }
+
   bool _canRun(Project project, _ProjectDraft draft) =>
+      !_closing &&
       _busy == null &&
       draft.sdk != null &&
       draft.devices.any(
@@ -1613,7 +2565,10 @@ class _WorkbenchState extends State<Workbench> {
                 ),
               )
               .toList(),
-          onChanged: (id) => setState(() => draft.deviceId = id),
+          onChanged: (id) => setState(() {
+            draft.deviceId = id;
+            _draftChanged(draft);
+          }),
         ),
       );
       final actions = Row(
@@ -1806,6 +2761,7 @@ class _WorkbenchState extends State<Workbench> {
     if (_tab == 0) {
       return LogPanel(
         key: ValueKey('logs-${session.id}-${session.generation}'),
+        searchFocus: _searchFocus,
         bridge: widget.bridge,
         session: session,
       );
@@ -1820,36 +2776,20 @@ class _WorkbenchState extends State<Workbench> {
     if (_tab == 2) {
       return DevToolsPanel(
         key: ValueKey('devtools-${session.id}-${session.generation}'),
+        searchFocus: _searchFocus,
         bridge: widget.bridge,
         session: session,
       );
     }
-    return Center(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.science_outlined, size: 40, color: _colors.outline),
-            const SizedBox(height: 16),
-            Text(
-              '测试发现与结果树待实现',
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '普通应用会话不能替代测试适配器。\n本页尚不提供测试执行能力。',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: _colors.onSurfaceVariant),
-            ),
-            if (session.serviceUri != null) ...[
-              const SizedBox(height: 16),
-              SelectableText('VM Service: ${session.serviceUri}'),
-            ],
-          ],
-        ),
-      ),
+    final project = _projects
+        .where((p) => p.path == session.projectPath)
+        .firstOrNull;
+    if (project == null) return const Center(child: Text('请先选择项目'));
+    return TestPanel(
+      key: ValueKey('tests-${project.path}'),
+      bridge: widget.bridge,
+      project: project,
+      sdkPreference: _drafts[project.path]?.sdkPath.text.trim(),
     );
   }
 
@@ -1873,6 +2813,14 @@ class _WorkbenchState extends State<Workbench> {
           ),
         ),
         const SizedBox(width: 12),
+        IconButton(
+          key: const ValueKey('workbench-shortcuts'),
+          tooltip: '快捷键',
+          onPressed: _showShortcuts,
+          icon: const Icon(Icons.keyboard_outlined, size: 18),
+          constraints: const BoxConstraints.tightFor(width: 28, height: 24),
+          padding: EdgeInsets.zero,
+        ),
         ValueListenableBuilder<Session?>(
           valueListenable: _selected,
           builder: (context, session, _) => Text(

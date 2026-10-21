@@ -22,7 +22,7 @@ pub enum RunMode {
     Profile,
     Release,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvVar {
     pub name: String,
     pub value: String,
@@ -110,7 +110,9 @@ while True:
     elif command=='configurationDone':
         response(request);response(launch);event('flutter.appStarted');event('dart.debuggerUris',{'vmServiceUri':'http://127.0.0.1:1234/token/'});event('thread',{'threadId':1,'reason':'started'})
         sys.stderr.write('adapter diagnostic\n');sys.stderr.flush();event('output',{'category':'stdout','output':'hello fixture\n'})
-    elif command=='hotReload':response(request,success=False,message='fixture compile error')
+    elif command=='hotReload':
+        if os.environ.get('DELAY_HOT_RELOAD'):time.sleep(1.2)
+        response(request,success=False,message='fixture compile error')
     elif command=='ignore':pass
     elif command=='blockRead':response(request);time.sleep(60)
     elif command=='fixtureExit':response(request);event('exited',{'exitCode':1})
@@ -136,6 +138,186 @@ while True:
             flavor: None,
             dart_defines: vec![],
         }
+    }
+
+    #[test]
+    fn device_dart_output_and_unprefixed_continuations_are_not_session_owned() {
+        let mut logs = LogBuffer::new(100, 4096);
+        for category in ["stdout", "console"] {
+            for output in [
+                "flutter: foreign project",
+                "foreign continuation without a prefix",
+            ] {
+                record_adapter_output(
+                    &mut logs,
+                    &json!({"category":category,"output":output}),
+                    true,
+                );
+            }
+        }
+        assert!(logs.query(None, 100, None).entries.is_empty());
+        record_adapter_output(
+            &mut logs,
+            &json!({"category":"stderr","output":"compiler diagnostic"}),
+            true,
+        );
+        let page = logs.query(None, 100, None);
+        assert_eq!(page.entries[0].text, "compiler diagnostic");
+        assert_eq!(page.entries[0].category, "stderr");
+        // Attach and Release retain their existing adapter output behavior.
+        record_adapter_output(
+            &mut logs,
+            &json!({"category":"stdout","output":"flutter: original output"}),
+            false,
+        );
+        assert_eq!(
+            logs.query(None, 100, None).entries.last().unwrap().text,
+            "flutter: original output"
+        );
+    }
+
+    #[test]
+    fn ios_ports_match_for_simulator_discovery_and_keep_dds_separate() {
+        let mut args = vec![
+            "--flavor".into(),
+            "a b".into(),
+            "--device-vmservice-port=0".into(),
+        ];
+        let port = ios_vm_service_arguments(&mut args).unwrap();
+        assert_ne!(port.port(), 0);
+        assert_eq!(&args[..2], ["--flavor", "a b"]);
+        assert!(args.contains(&format!("--device-vmservice-port={}", port.port())));
+        assert!(args.contains(&format!("--host-vmservice-port={}", port.port())));
+        assert!(args.contains(&"--dds-port=0".into()));
+        let mut conflicting = vec![
+            "--device-vmservice-port".into(),
+            "1234".into(),
+            "--host-vmservice-port=1235".into(),
+        ];
+        assert!(ios_vm_service_arguments(&mut conflicting).is_err());
+        let mut duplicate = vec![
+            "--vm-service-port=1234".into(),
+            "--host-vmservice-port=1234".into(),
+        ];
+        assert!(ios_vm_service_arguments(&mut duplicate).is_err());
+        let mut missing = vec!["--device-vmservice-port".into()];
+        assert!(ios_vm_service_arguments(&mut missing).is_err());
+        let mut invalid = vec!["--dds-port=65536".into()];
+        assert!(ios_vm_service_arguments(&mut invalid).is_err());
+    }
+
+    #[tokio::test]
+    async fn ios_progress_keeps_startup_status_and_terminal_state_releases_port() {
+        let sdk = fake_sdk(false);
+        let (events, _) = broadcast::channel(100);
+        let session = Session::new(
+            "ios-progress".into(),
+            config(sdk.path(), false),
+            events,
+            Ok(true),
+        );
+        let port = crate::vm_logs::ReservedVmPort::reserve(None).unwrap();
+        let number = port.port();
+        *session.vm_port.lock().await = Some(port);
+        session
+            .handle_event(
+                json!({"event":"progressUpdate","body":{"message":"Running Xcode build…"}}),
+            )
+            .await;
+        assert_eq!(
+            session.logs.lock().await.query(None, 10, None).entries[0].text,
+            "Running Xcode build…"
+        );
+        session
+            .state(SessionState::Failed, Some("fixture startup failure".into()))
+            .await;
+        assert!(session.vm_port.lock().await.is_none());
+        assert!(crate::vm_logs::ReservedVmPort::reserve(Some(number)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn device_discovery_failure_cannot_fall_back_to_mixed_device_logs() {
+        let sdk = fake_sdk(false);
+        let (events, _) = broadcast::channel(100);
+        let session = Session::new(
+            "device-discovery-error".into(),
+            config(sdk.path(), false),
+            events,
+            Err(anyhow!("SDK device discovery failed")),
+        );
+        session.clone().run().await;
+        assert_eq!(session.snapshot.lock().await.state, SessionState::Failed);
+        assert!(session.peer.lock().await.is_none());
+        let requests = fs::read_to_string(sdk.path().join("requests.jsonl")).unwrap();
+        assert!(!requests.contains("debug-adapter"));
+    }
+
+    #[tokio::test]
+    async fn vm_output_subscription_reuses_uri_and_cancels_on_stop() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::accept_async;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let uri = format!("http://{}/token/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut socket = accept_async(listener.accept().await.unwrap().0)
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                let request: Value =
+                    serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap())
+                        .unwrap();
+                socket
+                    .send(
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":{"type":"Success"}})
+                            .to_string()
+                            .into(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            socket.send(json!({"method":"streamNotify","params":{"streamId":"Stdout","event":{"bytes":"b3duIHByb2plY3QK"}}}).to_string().into()).await.unwrap();
+            // Cancelling the session must close its VM connection.
+            tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap();
+        });
+        let sdk = fake_sdk(false);
+        let (events, _) = broadcast::channel(100);
+        let session = Session::new(
+            "vm-output".into(),
+            config(sdk.path(), false),
+            events,
+            Ok(true),
+        );
+        session.state(SessionState::Running, None).await;
+        session.start_vm_output(&uri).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if session.logs.lock().await.latest_id() > 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let first_task = session.vm_output.lock().await.as_ref().unwrap().1.id();
+        session.start_vm_output(&uri).await;
+        assert_eq!(
+            session.vm_output.lock().await.as_ref().unwrap().1.id(),
+            first_task
+        );
+        assert_eq!(
+            session.logs.lock().await.query(None, 100, None).entries[0].text,
+            "own project"
+        );
+        session.stop().await.unwrap();
+        assert!(session.vm_output.lock().await.is_none());
+        server.await.unwrap();
+        // Late URI events cannot reconnect an ended session.
+        session.start_vm_output(&uri).await;
+        assert!(session.vm_output.lock().await.is_none());
     }
     async fn wait_state(session: &Session, state: SessionState) {
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -164,6 +346,7 @@ while True:
             "oversized-service-test".into(),
             config(sdk.path(), false),
             events,
+            Ok(false),
         );
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
@@ -188,7 +371,12 @@ while True:
     async fn configuration_handshake_and_attach_disconnect_preserve_target() {
         let sdk = fake_sdk(false);
         let (events, _) = broadcast::channel(100);
-        let session = Session::new("attach-test".into(), config(sdk.path(), true), events);
+        let session = Session::new(
+            "attach-test".into(),
+            config(sdk.path(), true),
+            events,
+            Ok(false),
+        );
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
         wait_state(&session, SessionState::Running).await;
@@ -243,7 +431,12 @@ while True:
     async fn launch_stops_owned_target_and_cancelled_prepare_never_launches() {
         let sdk = fake_sdk(false);
         let (events, _) = broadcast::channel(100);
-        let session = Session::new("launch-test".into(), config(sdk.path(), false), events);
+        let session = Session::new(
+            "launch-test".into(),
+            config(sdk.path(), false),
+            events,
+            Ok(false),
+        );
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
         wait_state(&session, SessionState::Running).await;
@@ -263,7 +456,12 @@ while True:
         );
         let slow = fake_sdk(true);
         let (events, _) = broadcast::channel(100);
-        let session = Session::new("cancel-test".into(), config(slow.path(), false), events);
+        let session = Session::new(
+            "cancel-test".into(),
+            config(slow.path(), false),
+            events,
+            Ok(false),
+        );
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
         session.stop().await.unwrap();
@@ -281,7 +479,7 @@ while True:
             name: "DELAY_INITIALIZE".into(),
             value: "1".into(),
         });
-        let session = Session::new("cancel-initialize".into(), configuration, events);
+        let session = Session::new("cancel-initialize".into(), configuration, events, Ok(false));
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
         wait_state(&session, SessionState::Starting).await;
@@ -299,7 +497,12 @@ while True:
     async fn nonzero_exit_and_blocked_writer_reclaim_adapter() {
         let sdk = fake_sdk(false);
         let (events, _) = broadcast::channel(100);
-        let session = Session::new("failed-exit".into(), config(sdk.path(), false), events);
+        let session = Session::new(
+            "failed-exit".into(),
+            config(sdk.path(), false),
+            events,
+            Ok(false),
+        );
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
         wait_state(&session, SessionState::Running).await;
@@ -323,6 +526,7 @@ while True:
             &HashMap::new(),
             WireProtocol::Dap,
             None,
+            false,
         )
         .unwrap();
         peer.request("blockRead", json!({}), Duration::from_secs(1))
@@ -346,7 +550,12 @@ while True:
     async fn isolate_pause_state_waits_for_all_paused_isolates() {
         let sdk = fake_sdk(false);
         let (events, _) = broadcast::channel(100);
-        let session = Session::new("isolates".into(), config(sdk.path(), false), events);
+        let session = Session::new(
+            "isolates".into(),
+            config(sdk.path(), false),
+            events,
+            Ok(false),
+        );
         session
             .handle_event(json!({"event":"stopped","body":{"threadId":1}}))
             .await;
@@ -365,6 +574,108 @@ while True:
             )
             .await;
         assert_eq!(session.snapshot.lock().await.state, SessionState::Running);
+    }
+    #[tokio::test]
+    async fn automatic_reload_busy_guard_does_not_attempt_or_consume_request() {
+        let sdk = fake_sdk(false);
+        let (events, _) = broadcast::channel(100);
+        let session = Session::new(
+            "auto-busy".into(),
+            config(sdk.path(), false),
+            events,
+            Ok(false),
+        );
+        session.set_auto_reload(true);
+        let runner = tokio::spawn(session.clone().run());
+        wait_state(&session, SessionState::Running).await;
+        let held = session.operation_lock.lock().await;
+        assert!(session.try_automatic_hot_reload().await.is_none());
+        drop(held);
+        // A real DAP attempt, including compile failure, consumes one revision.
+        assert!(session.try_automatic_hot_reload().await.unwrap().is_err());
+        session.set_auto_reload(false);
+        assert!(session.try_automatic_hot_reload().await.is_none());
+        session.stop().await.unwrap();
+        runner.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_saved_during_reload_is_reloaded_after_current_request_finishes() {
+        let sdk = fake_sdk(false);
+        let mut configuration = config(sdk.path(), false);
+        configuration.env.push(EnvVar {
+            name: "DELAY_HOT_RELOAD".into(),
+            value: "1".into(),
+        });
+        let (events, _) = broadcast::channel(100);
+        let session = Session::new("auto-followup".into(), configuration, events, Ok(false));
+        session.set_auto_reload(true);
+        crate::auto_reload::start(session.clone());
+        let runner = tokio::spawn(session.clone().run());
+        wait_state(&session, SessionState::Running).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while session
+                .logs
+                .lock()
+                .await
+                .query(None, 100, Some("Automatic hot reload monitoring ready"))
+                .entries
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let held = session.operation_lock.lock().await;
+        fs::write(
+            sdk.path().join("lib/main.dart"),
+            "void main() { print('one'); }",
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        let count = || {
+            fs::read_to_string(sdk.path().join("requests.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| {
+                    serde_json::from_str::<Value>(line).unwrap()["command"] == "hotReload"
+                })
+                .count()
+        };
+        assert_eq!(
+            count(),
+            0,
+            "busy lock must preserve the pending source revision"
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while count() < 1 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        fs::write(
+            sdk.path().join("lib/main.dart"),
+            "void main() { print('saved during request'); }",
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(6), async {
+            while count() < 2 {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(1800)).await;
+        assert_eq!(
+            count(),
+            2,
+            "compile failure must not retry the same revision forever"
+        );
+        session.stop().await.unwrap();
+        runner.await.unwrap();
     }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -459,6 +770,7 @@ impl ProtocolPeer {
         env: &HashMap<String, String>,
         protocol: WireProtocol,
         logs: Option<Arc<Mutex<LogBuffer>>>,
+        isolate_dart_output: bool,
     ) -> Result<Arc<Self>> {
         let mut process =
             OwnedProcess::spawn(&crate::process::flutter_program(sdk), args, cwd, env)?;
@@ -528,12 +840,10 @@ impl ProtocolPeer {
                                 {
                                     if let Some(logs) = output_logs.as_ref() {
                                         let body = &message["body"];
-                                        logs.lock().await.push(
-                                            body["category"].as_str().unwrap_or("stdout"),
-                                            body["output"]
-                                                .as_str()
-                                                .or(body["message"].as_str())
-                                                .unwrap_or(""),
+                                        record_adapter_output(
+                                            &mut *logs.lock().await,
+                                            body,
+                                            isolate_dart_output && message["event"] == "output",
                                         );
                                         continue;
                                     }
@@ -669,6 +979,85 @@ impl ProtocolPeer {
     }
 }
 
+fn record_adapter_output(logs: &mut LogBuffer, body: &Value, isolate_dart_output: bool) {
+    let category = body["category"].as_str().unwrap_or("stdout");
+    let text = body["output"]
+        .as_str()
+        .or(body["message"].as_str())
+        .unwrap_or("");
+    if isolate_dart_output {
+        // iOS device logs are filtered by executable name (usually Runner),
+        // not by process. Their Dart output may belong to another application.
+        // Multiline continuation lines have no ownership or prefix. The SDK
+        // labels stdout as console before appStarted, so both are unsafe.
+        // Tool errors use stderr; startup status comes from DAP progress.
+        if category != "stdout" && category != "console" {
+            logs.push(category, text);
+        }
+    } else {
+        logs.push(category, text);
+    }
+}
+
+fn ios_vm_service_arguments(args: &mut Vec<String>) -> Result<crate::vm_logs::ReservedVmPort> {
+    let mut retained = Vec::with_capacity(args.len() + 3);
+    let mut device_port = None;
+    let mut host_port = None;
+    let mut dds_port = None;
+    let mut index = 0;
+    while index < args.len() {
+        let (name, inline) = args[index]
+            .split_once('=')
+            .map_or((args[index].as_str(), None), |(name, value)| {
+                (name, Some(value))
+            });
+        let destination = match name {
+            "--device-vmservice-port" => &mut device_port,
+            "--host-vmservice-port" | "--vm-service-port" => &mut host_port,
+            "--dds-port" => &mut dds_port,
+            _ => {
+                retained.push(args[index].clone());
+                index += 1;
+                continue;
+            }
+        };
+        if destination.is_some() {
+            bail!("Duplicate iOS VM service port option: {name}");
+        }
+        let value = if let Some(value) = inline {
+            value
+        } else {
+            index += 1;
+            args.get(index)
+                .context("Missing iOS VM service port value")?
+        };
+        *destination = Some(
+            value
+                .parse::<u16>()
+                .context("Invalid iOS VM service port")?,
+        );
+        index += 1;
+    }
+    let requested = device_port.filter(|port| *port != 0);
+    let host = host_port.filter(|port| *port != 0);
+    if requested.is_some() && host.is_some() && requested != host {
+        bail!("iOS log isolation requires matching device and host VM service ports");
+    }
+    let port = crate::vm_logs::ReservedVmPort::reserve(requested.or(host))?;
+    if dds_port == Some(port.port()) {
+        bail!("DDS and the iOS VM service must use different ports");
+    }
+    retained.extend([
+        format!("--device-vmservice-port={}", port.port()),
+        format!("--host-vmservice-port={}", port.port()),
+        // An explicit DDS port keeps Flutter from repurposing the simulator's
+        // host VM port for DDS and starting its VM on a random port instead.
+        format!("--dds-port={}", dds_port.unwrap_or(0)),
+    ]);
+    *args = retained;
+    Ok(port)
+}
+
 pub(crate) struct Session {
     pub(crate) snapshot: Mutex<SessionSnapshot>,
     config: RunConfiguration,
@@ -679,13 +1068,23 @@ pub(crate) struct Session {
     state_changed: watch::Sender<SessionState>,
     paused_threads: Mutex<HashSet<i64>>,
     operation_lock: Mutex<()>,
+    pub(crate) auto_reload: watch::Sender<bool>,
+    vm_output: Mutex<Option<(String, tokio::task::JoinHandle<()>)>>,
+    isolate_device_logs: bool,
+    device_setup_error: Option<String>,
+    vm_port: Mutex<Option<crate::vm_logs::ReservedVmPort>>,
 }
 impl Session {
     pub(crate) fn new(
         id: String,
         config: RunConfiguration,
         events: broadcast::Sender<CoreEvent>,
+        isolate_device_logs: Result<bool>,
     ) -> Arc<Self> {
+        let (isolate_device_logs, device_setup_error) = match isolate_device_logs {
+            Ok(enabled) => (enabled, None),
+            Err(error) => (false, Some(error.to_string())),
+        };
         let snapshot = SessionSnapshot {
             session_id: id,
             generation: 1,
@@ -707,6 +1106,10 @@ impl Session {
         let (state_changed, _) = watch::channel(SessionState::Preparing);
         Arc::new(Self {
             snapshot: Mutex::new(snapshot),
+            device_setup_error,
+            isolate_device_logs: isolate_device_logs
+                && config.mode != RunMode::Release
+                && config.attach_uri.is_none(),
             config,
             logs: Arc::new(Mutex::new(LogBuffer::new(10000, 4 * 1024 * 1024))),
             peer: Mutex::new(None),
@@ -715,7 +1118,22 @@ impl Session {
             state_changed,
             paused_threads: Mutex::new(HashSet::new()),
             operation_lock: Mutex::new(()),
+            auto_reload: watch::channel(false).0,
+            vm_output: Mutex::new(None),
+            vm_port: Mutex::new(None),
         })
+    }
+    pub(crate) fn set_auto_reload(&self, enabled: bool) {
+        self.auto_reload.send_if_modified(|current| {
+            if *current == enabled {
+                return false;
+            }
+            *current = enabled;
+            true
+        });
+    }
+    pub(crate) fn subscribe_state(&self) -> watch::Receiver<SessionState> {
+        self.state_changed.subscribe()
     }
     pub(crate) async fn emit(&self, kind: CoreEventKind, payload: Option<String>) {
         let mut snapshot = self.snapshot.lock().await;
@@ -746,6 +1164,18 @@ impl Session {
                 snapshot.operation = None;
                 snapshot.service_uri = None;
             }
+        }
+        if matches!(
+            state,
+            SessionState::Stopping | SessionState::Ended | SessionState::Failed
+        ) {
+            if let Some((_, task)) = self.vm_output.lock().await.take() {
+                task.abort();
+                let _ = task.await;
+            }
+        }
+        if matches!(state, SessionState::Ended | SessionState::Failed) {
+            self.vm_port.lock().await.take();
         }
         self.emit(CoreEventKind::State, None).await;
     }
@@ -782,6 +1212,9 @@ impl Session {
             );
         }
         self.emit(CoreEventKind::State, None).await;
+        if let Some(error) = &self.device_setup_error {
+            bail!("{error}");
+        }
         let cwd = Path::new(&self.config.project_path);
         if !cwd.join("pubspec.yaml").is_file() {
             bail!("Select a Flutter package containing pubspec.yaml");
@@ -840,6 +1273,9 @@ impl Session {
             if self.snapshot.lock().await.state != SessionState::Preparing {
                 return Ok(());
             }
+            if self.isolate_device_logs {
+                *self.vm_port.lock().await = Some(ios_vm_service_arguments(&mut tool_args)?);
+            }
             let peer = ProtocolPeer::spawn(
                 &sdk,
                 &["debug-adapter".into()],
@@ -847,6 +1283,7 @@ impl Session {
                 &env,
                 WireProtocol::Dap,
                 Some(self.logs.clone()),
+                self.isolate_device_logs,
             )?;
             *slot = Some(peer.clone());
             peer
@@ -962,10 +1399,12 @@ impl Session {
                 self.initialized.send_replace(true);
             }
             "output" => {
-                self.logs.lock().await.push(
-                    body["category"].as_str().unwrap_or("stdout"),
-                    body["output"].as_str().unwrap_or(""),
-                );
+                record_adapter_output(&mut *self.logs.lock().await, body, self.isolate_device_logs);
+            }
+            "progressStart" | "progressUpdate" if self.isolate_device_logs => {
+                if let Some(message) = body["message"].as_str() {
+                    self.logs.lock().await.push("console", message);
+                }
             }
             "flutter.appStarted" => {
                 self.state(SessionState::Running, None).await;
@@ -1014,6 +1453,7 @@ impl Session {
                     .or(body["vmServiceWsUri"].as_str());
                 if let Some(uri) = uri {
                     self.snapshot.lock().await.service_uri = Some(uri.into());
+                    self.start_vm_output(uri).await;
                     self.emit(CoreEventKind::ServiceUri, None).await;
                 }
             }
@@ -1037,6 +1477,42 @@ impl Session {
                     .await;
             }
         }
+    }
+
+    async fn start_vm_output(&self, uri: &str) {
+        // Attach adapters already subscribe to the target VM's output streams.
+        if self.config.attach_uri.is_some() || !self.isolate_device_logs {
+            return;
+        }
+        let mut slot = self.vm_output.lock().await;
+        if slot.as_ref().is_some_and(|(current, _)| current == uri) {
+            return;
+        }
+        if matches!(
+            self.snapshot.lock().await.state,
+            SessionState::Stopping | SessionState::Ended | SessionState::Failed
+        ) {
+            return;
+        }
+        if let Some((_, task)) = slot.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        let address = uri.to_owned();
+        let logs = self.logs.clone();
+        let (ready, _) = watch::channel(false);
+        let task = tokio::spawn(async move {
+            let result = crate::vm_logs::collect(&address, logs.clone(), ready).await;
+            let reason = result
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "VM log connection closed".into());
+            logs.lock().await.push(
+                "warning",
+                &format!("Dart output stream unavailable: {reason}. Device Dart logs remain hidden to prevent output from other applications."),
+            );
+        });
+        *slot = Some((uri.to_owned(), task));
     }
     pub(crate) async fn request(
         &self,
@@ -1099,11 +1575,39 @@ impl Session {
             }
             snapshot.operation = Some(if restart { "hotRestart" } else { "hotReload" }.into());
         }
+        self.hot_update_request(restart, false).await
+    }
+    /// None means no request was attempted: preserve the source version for retry.
+    pub(crate) async fn try_automatic_hot_reload(&self) -> Option<Result<()>> {
+        let _operation = self.operation_lock.try_lock().ok()?;
+        {
+            let mut snapshot = self.snapshot.lock().await;
+            if !*self.auto_reload.borrow()
+                || !matches!(snapshot.state, SessionState::Running | SessionState::Paused)
+                || !crate::auto_reload::hot_reload_supported(
+                    snapshot.mode,
+                    snapshot.no_debug,
+                    &snapshot.capabilities_json,
+                )
+            {
+                return None;
+            }
+            snapshot.operation = Some("hotReload".into());
+        }
+        Some(self.hot_update_request(false, true).await)
+    }
+    async fn hot_update_request(&self, restart: bool, automatic: bool) -> Result<()> {
+        if automatic {
+            self.logs
+                .lock()
+                .await
+                .push("system", "Dart files saved; automatic hot reload");
+        }
         self.emit(CoreEventKind::State, None).await;
         let result = self
             .request(
                 if restart { "hotRestart" } else { "hotReload" },
-                json!({"reason":"manual"}),
+                json!({"reason": if automatic { "save" } else { "manual" }}),
                 Duration::from_secs(90),
             )
             .await;

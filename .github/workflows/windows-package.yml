@@ -1,0 +1,87 @@
+name: Windows package
+run-name: Windows x64 package · ${{ github.ref_name }}
+
+on:
+  push:
+    branches:
+      - 'codex/windows-package-*'
+    tags:
+      - 'windows-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      FLUTTER_DEV_SETTINGS_PATH: ${{ runner.temp }}/flutter-dev-package/settings.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.3'
+          channel: stable
+          cache: true
+      - name: Resolve dependencies
+        run: flutter pub get
+      - name: Analyze Flutter
+        run: flutter analyze
+      - name: Build Windows release including Rust core
+        run: flutter build windows --release
+      - name: Create installer and portable archive
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+      - name: Check installation and startup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-Item build/windows/installer/*-setup.exe
+          $installDir = Join-Path $env:RUNNER_TEMP 'flutter-dev-install-smoke'
+          $installLog = Join-Path $env:RUNNER_TEMP 'flutter-dev-install.log'
+          $app = $null
+          try {
+            $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installDir`"", "/LOG=`"$installLog`"") -Wait -PassThru
+            if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
+            foreach ($file in @('flutter_dev.exe', 'flutter_dev_core.dll', 'flutter_windows.dll', 'data/flutter_assets/AssetManifest.bin')) {
+              if (-not (Test-Path (Join-Path $installDir $file))) { throw "Installed file missing: $file" }
+            }
+            $nativeLibrary = Join-Path $installDir 'flutter_dev_core.dll'
+            flutter test test/project_git_native_test.dart "--dart-define=FLUTTER_DEV_NATIVE_LIBRARY=$nativeLibrary"
+            if ($LASTEXITCODE -ne 0) { throw 'Installed Rust core FFI check failed.' }
+            $app = Start-Process -FilePath (Join-Path $installDir 'flutter_dev.exe') -WorkingDirectory $installDir -PassThru
+            Start-Sleep -Seconds 10
+            if ($app.HasExited) { throw "Installed application exited during startup: $($app.ExitCode)" }
+            "Installation and 10-second startup smoke check passed."
+          } finally {
+            if ($null -ne $app -and -not $app.HasExited) { Stop-Process -Id $app.Id -Force }
+            $uninstaller = Join-Path $installDir 'unins000.exe'
+            if (Test-Path $uninstaller) {
+              $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+              if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed: $($uninstall.ExitCode)" }
+            }
+          }
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlutterDev-windows-x64-${{ github.run_number }}
+          path: |
+            build/windows/installer/*-setup.exe
+            build/windows/installer/*-portable.zip
+            build/windows/installer/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Upload installation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-install-log-${{ github.run_number }}
+          path: ${{ runner.temp }}/flutter-dev-install.log
+          if-no-files-found: ignore
+          retention-days: 7

@@ -7,19 +7,25 @@ import 'package:flutter/material.dart';
 import '../../core/presentation/workbench_models.dart';
 import '../../core/presentation/workbench_select.dart';
 
-/// Build configuration and progress belong to this window, independently of a
-/// running device session. Keep the window open while the build is active.
+/// Configure a build or inspect a core-owned task without tying its lifetime
+/// to this window or a running device session.
 class BuildDialog extends StatefulWidget {
   const BuildDialog({
     super.key,
     required this.bridge,
     required this.project,
     this.sdkPreference,
+    this.initialBuild,
+    this.onBuildStarted,
+    this.startBuild,
   });
 
   final WorkbenchBridge bridge;
   final Project project;
   final String? sdkPreference;
+  final BuildSnapshot? initialBuild;
+  final ValueChanged<BuildSnapshot>? onBuildStarted;
+  final Future<BuildSnapshot> Function(BuildConfig)? startBuild;
 
   @override
   State<BuildDialog> createState() => _BuildDialogState();
@@ -60,13 +66,18 @@ class _BuildDialogState extends State<BuildDialog> {
   String? _selectedId;
   String _target = 'apk';
   BuildSnapshot? _snapshot;
-  Timer? _timer;
+  Timer? _timer, _versionTimer;
+  int _versionRevision = 0;
+  BuildVersion? _previewVersion;
+  bool _versionLoading = false, _versionInvalidArgs = false;
+  String? _versionError;
   int _cursor = 0;
   bool _loading = true, _saving = false, _starting = false;
   bool _polling = false, _stopping = false, _opening = false;
   bool _logsDropped = false, _draining = false;
   String? _error, _pollError, _argsError, _nameError;
 
+  bool get _details => widget.initialBuild != null;
   bool get _active => _starting || (_snapshot?.active ?? false);
   bool get _locked => _loading || _saving || _opening || _active;
   bool get _succeeded => _snapshot?.state == 'succeeded';
@@ -75,11 +86,127 @@ class _BuildDialogState extends State<BuildDialog> {
   void initState() {
     super.initState();
     _args.addListener(_updatePreview);
-    _loadPresets();
+    final initial = widget.initialBuild;
+    if (initial == null) {
+      _scheduleVersionRead();
+      _loadPresets();
+    } else {
+      _snapshot = initial;
+      _target = initial.target;
+      _loading = false;
+      _poll();
+    }
   }
 
   void _updatePreview() {
     if (mounted) setState(() => _argsError = null);
+    _scheduleVersionRead();
+  }
+
+  void _scheduleVersionRead({bool immediate = false}) {
+    if (!mounted || _details) return;
+    _versionTimer?.cancel();
+    final revision = ++_versionRevision;
+    List<String> args;
+    try {
+      final value = jsonDecode(_args.text.trim().isEmpty ? '[]' : _args.text);
+      if (value is! List || value.any((argument) => argument is! String)) {
+        throw const FormatException();
+      }
+      args = value.cast<String>();
+    } catch (_) {
+      setState(() {
+        _previewVersion = null;
+        _versionInvalidArgs = true;
+        _versionLoading = false;
+        _versionError = null;
+      });
+      return;
+    }
+    setState(() {
+      _previewVersion = null;
+      _versionInvalidArgs = false;
+      _versionLoading = true;
+      _versionError = null;
+    });
+    _versionTimer = Timer(
+      Duration(milliseconds: immediate ? 0 : 200),
+      () async {
+        try {
+          final version = await widget.bridge.readBuildVersion(
+            widget.project.path,
+            args,
+          );
+          if (!mounted || revision != _versionRevision) return;
+          setState(() {
+            _previewVersion = version;
+            _versionLoading = false;
+          });
+        } catch (error) {
+          if (!mounted || revision != _versionRevision) return;
+          setState(() {
+            _versionError = '$error';
+            _versionLoading = false;
+          });
+        }
+      },
+    );
+  }
+
+  Widget _versionPreview() {
+    final frozen = _details || _active;
+    final label = frozen
+        ? (_snapshot?.version?.label ?? '未读取')
+        : _versionInvalidArgs
+        ? '参数无效'
+        : _versionLoading
+        ? '读取中…'
+        : _versionError != null
+        ? '读取失败'
+        : (_previewVersion?.label ?? '未读取');
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '构建版本：$label',
+                key: const Key('build-version'),
+                style: const TextStyle(fontSize: 12),
+              ),
+              if (!frozen && _versionError != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  _versionError!,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        if (!frozen)
+          IconButton(
+            key: const Key('build-version-refresh'),
+            tooltip: '刷新构建版本',
+            onPressed: _versionLoading || _versionInvalidArgs
+                ? null
+                : () => _scheduleVersionRead(immediate: true),
+            icon: const Icon(Icons.refresh, size: 16),
+            visualDensity: VisualDensity.compact,
+          ),
+        if (!frozen && _versionError != null)
+          TextButton(
+            key: const Key('build-version-retry'),
+            onPressed: () => _scheduleVersionRead(immediate: true),
+            child: const Text('重试'),
+          ),
+      ],
+    );
   }
 
   Future<void> _loadPresets() async {
@@ -126,6 +253,7 @@ class _BuildDialogState extends State<BuildDialog> {
     _argsError = null;
     _nameError = null;
     _error = null;
+    _scheduleVersionRead();
   }
 
   List<String>? _validatedArgs() {
@@ -206,7 +334,7 @@ class _BuildDialogState extends State<BuildDialog> {
       _pollError = null;
     });
     try {
-      final snapshot = await widget.bridge.startBuild(
+      final snapshot = await (widget.startBuild ?? widget.bridge.startBuild)(
         BuildConfig(
           projectPath: widget.project.path,
           sdkPath: widget.sdkPreference,
@@ -215,6 +343,9 @@ class _BuildDialogState extends State<BuildDialog> {
           outputDirectory: _outputDirectory,
         ),
       );
+      // The owner must learn about the task even when this route was closed
+      // while the core was resolving the SDK or starting the process.
+      widget.onBuildStarted?.call(snapshot);
       if (!mounted) return;
       setState(() => _snapshot = snapshot);
       await _poll();
@@ -228,6 +359,8 @@ class _BuildDialogState extends State<BuildDialog> {
   Future<void> _poll() async {
     final id = _snapshot?.id;
     if (!mounted || id == null || _polling) return;
+    _timer?.cancel();
+    _timer = null;
     _polling = true;
     var moreLogs = false;
     var retryLogs = false;
@@ -354,6 +487,8 @@ class _BuildDialogState extends State<BuildDialog> {
   @override
   void dispose() {
     _timer?.cancel();
+    _versionTimer?.cancel();
+    _versionRevision++;
     _name.dispose();
     _nameFocus.dispose();
     _args.removeListener(_updatePreview);
@@ -532,6 +667,8 @@ class _BuildDialogState extends State<BuildDialog> {
                 ),
               ],
             ),
+            const SizedBox(height: 12),
+            _versionPreview(),
             const SizedBox(height: 20),
             TextField(
               key: const Key('build-args'),
@@ -653,6 +790,11 @@ class _BuildDialogState extends State<BuildDialog> {
           if (_active) ...[
             const LinearProgressIndicator(minHeight: 2),
             const SizedBox(height: 12),
+            Text(
+              '可关闭窗口继续后台构建，通过左侧“构建任务”查看进度。',
+              style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
           ],
           for (final error in [_snapshot?.error, _pollError, _error])
             if (error != null)
@@ -663,6 +805,16 @@ class _BuildDialogState extends State<BuildDialog> {
                   style: TextStyle(fontSize: 12, color: colors.error),
                 ),
               ),
+          if (_snapshot != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Text(
+                '构建版本：${_snapshot!.version?.label ?? '未读取'}',
+                key: Key(_details ? 'build-version' : 'build-snapshot-version'),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
           if (_snapshot?.outputDirectory != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 10),
@@ -727,7 +879,7 @@ class _BuildDialogState extends State<BuildDialog> {
     final compact = viewport.width < 600;
     final padding = compact ? 16.0 : 24.0;
     return PopScope(
-      canPop: !_active,
+      canPop: true,
       child: Dialog(
         key: const ValueKey('build-dialog'),
         insetPadding: EdgeInsets.all(compact ? 12 : 24),
@@ -764,9 +916,9 @@ class _BuildDialogState extends State<BuildDialog> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text(
-                            '构建应用',
-                            style: TextStyle(
+                          Text(
+                            _details ? '构建详情' : '构建应用',
+                            style: const TextStyle(
                               fontSize: 22,
                               fontWeight: FontWeight.w600,
                               letterSpacing: -.5,
@@ -774,7 +926,9 @@ class _BuildDialogState extends State<BuildDialog> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            '${widget.project.name} · 配置并生成发布产物',
+                            _details
+                                ? '${widget.project.name} · ${_targetLabel(_target)}'
+                                : '${widget.project.name} · 配置并生成发布产物',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -794,10 +948,34 @@ class _BuildDialogState extends State<BuildDialog> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      _configuration(),
-                      const SizedBox(height: 14),
-                      _commandPreview(),
-                      const SizedBox(height: 14),
+                      if (_details) ...[
+                        _section(
+                          title: '构建任务',
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              SelectableText(
+                                widget.project.path,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: colors.onSurfaceVariant,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                '构建平台 / 产物类型：${_targetLabel(_target)}',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                      ] else ...[
+                        _configuration(),
+                        const SizedBox(height: 14),
+                        _commandPreview(),
+                        const SizedBox(height: 14),
+                      ],
                       _buildOutput(),
                     ],
                   ),
@@ -826,9 +1004,7 @@ class _BuildDialogState extends State<BuildDialog> {
                       ),
                     TextButton(
                       key: const Key('build-close'),
-                      onPressed: _active || _saving
-                          ? null
-                          : () => Navigator.of(context).pop(),
+                      onPressed: () => Navigator.of(context).pop(),
                       child: const Text('关闭'),
                     ),
                     if (_active)
@@ -847,7 +1023,7 @@ class _BuildDialogState extends State<BuildDialog> {
                               : '停止构建',
                         ),
                       )
-                    else
+                    else if (!_details)
                       FilledButton.icon(
                         key: const Key('build-start'),
                         onPressed: _locked || _polling || _draining

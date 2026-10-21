@@ -84,6 +84,7 @@ class BuildSnapshot {
   final String? outputDirectory;
   final String? error;
   final int? exitCode;
+  final BuildVersion? version;
 
   const BuildSnapshot({
     required this.id,
@@ -93,6 +94,7 @@ class BuildSnapshot {
     this.outputDirectory,
     this.error,
     this.exitCode,
+    this.version,
   });
 
   @override
@@ -103,7 +105,8 @@ class BuildSnapshot {
       target.hashCode ^
       outputDirectory.hashCode ^
       error.hashCode ^
-      exitCode.hashCode;
+      exitCode.hashCode ^
+      version.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -116,5 +119,24 @@ class BuildSnapshot {
           target == other.target &&
           outputDirectory == other.outputDirectory &&
           error == other.error &&
-          exitCode == other.exitCode;
+          exitCode == other.exitCode &&
+          version == other.version;
+}
+
+class BuildVersion {
+  final String? buildName;
+  final String? buildNumber;
+
+  const BuildVersion({this.buildName, this.buildNumber});
+
+  @override
+  int get hashCode => buildName.hashCode ^ buildNumber.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BuildVersion &&
+          runtimeType == other.runtimeType &&
+          buildName == other.buildName &&
+          buildNumber == other.buildNumber;
 }

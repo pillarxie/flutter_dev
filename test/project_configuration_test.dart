@@ -57,6 +57,8 @@ void main() {
       expect(key('flavor'), findsNothing);
       expect(find.text('Flutter SDK'), findsNothing);
       expect(find.text('启动选项'), findsNothing);
+      expect(find.text('启动配置'), findsNothing);
+      expect(find.text('Git 分支'), findsNothing);
 
       final startRect = tester.getRect(key('run-project'));
       final titleRect = tester.getRect(key('workspace-title'));

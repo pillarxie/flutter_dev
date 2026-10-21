@@ -35,6 +35,19 @@ impl OwnedProcess {
         cwd: Option<&Path>,
         env: &HashMap<String, String>,
     ) -> Result<Self> {
+        Self::spawn_with_env_removed(program, args, cwd, env, &[])
+    }
+
+    /// Removes selected inherited variables for tools whose repository context must
+    /// not leak from the process that launched the workbench. Other callers retain
+    /// the normal inherited environment through `spawn`.
+    pub(crate) fn spawn_with_env_removed(
+        program: &Path,
+        args: &[String],
+        cwd: Option<&Path>,
+        env: &HashMap<String, String>,
+        removed_env: &[&str],
+    ) -> Result<Self> {
         let mut command = command(program, args)?;
         command
             .stdin(Stdio::piped())
@@ -42,6 +55,9 @@ impl OwnedProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         configure_environment(&mut command, env)?;
+        for variable in removed_env {
+            command.env_remove(variable);
+        }
         if let Some(cwd) = cwd {
             command.current_dir(cwd);
         }
@@ -133,6 +149,67 @@ impl Drop for OwnedProcess {
     fn drop(&mut self) {
         self.kill_tree();
     }
+}
+
+/// Editors are handed off to the user and can outlive the workbench. Success
+/// confirms spawning and no failure observed during the handoff window; it does
+/// not claim that a long-lived GUI has finished opening the requested file.
+/// Keep argument-array execution and Windows batch checks without owning its tree.
+pub(crate) async fn launch_editor(program: &Path, args: &[String]) -> Result<()> {
+    observe_editor_handoff(spawn_editor(program, args)?).await
+}
+
+fn spawn_editor(program: &Path, args: &[String]) -> Result<Child> {
+    let mut command = command(program, args)?;
+    configure_environment(&mut command, &HashMap::new())?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to start editor {}", program.display()))
+}
+
+async fn observe_editor_handoff(mut child: Child) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let stderr = child.stderr.take();
+    let output = tokio::spawn(async move {
+        let mut captured = Vec::new();
+        if let Some(mut stream) = stderr {
+            let mut buffer = [0u8; 4096];
+            while let Ok(length) = stream.read(&mut buffer).await {
+                if length == 0 {
+                    break;
+                }
+                let remaining = 16384usize.saturating_sub(captured.len());
+                captured.extend_from_slice(&buffer[..length.min(remaining)]);
+            }
+        }
+        captured
+    });
+    match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(result) => {
+            let status = result.context("Wait for editor handoff")?;
+            if !status.success() {
+                let output = tokio::time::timeout(Duration::from_millis(250), output)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "Editor exited unsuccessfully ({status}): {}",
+                    String::from_utf8_lossy(&output).trim()
+                );
+            }
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+                let _ = output.await;
+            });
+        }
+    }
+    Ok(())
 }
 
 fn command(program: &Path, args: &[String]) -> Result<Command> {
@@ -384,6 +461,82 @@ mod windows_job {
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    // The interpreter can take several seconds to start under a parallel full
+    // suite. Readiness is an explicit fixture condition, independent of the
+    // production handoff observation window.
+    async fn editor_ready(child: &mut Child, pid_file: &Path) -> i32 {
+        let ready = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(pid_file) {
+                    if let Ok(pid) = pid.parse::<i32>() {
+                        return pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if ready.is_err() {
+            let _ = child.kill().await;
+        }
+        ready.expect("editor fixture did not report readiness")
+    }
+
+    struct FixtureEditor(i32);
+    impl Drop for FixtureEditor {
+        fn drop(&mut self) {
+            // Only the single process spawned by the fixture is addressed.
+            unsafe {
+                libc::kill(self.0, libc::SIGTERM);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn editor_handoff_reports_command_failure_without_shell_interpolation() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("editor");
+        let pid_file = root.path().join("editor.pid");
+        std::fs::write(&program,
+            "#!/usr/bin/env python3\nimport os,sys\nopen(sys.argv[1],'w').write(str(os.getpid()))\nprint(sys.argv[2],file=sys.stderr)\nsys.exit(7)\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = spawn_editor(
+            &program,
+            &[
+                pid_file.to_string_lossy().into_owned(),
+                "literal $(do-not-run)".into(),
+            ],
+        )
+        .unwrap();
+        editor_ready(&mut child, &pid_file).await;
+        // Waiting for this quick-exit fixture, rather than guessing when Python
+        // has started, makes the unsuccessful-exit branch deterministic.
+        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
+        let error = observe_editor_handoff(child).await.unwrap_err();
+        assert!(error.to_string().contains("literal $(do-not-run)"));
+        assert!(error.to_string().contains("7"));
+    }
+
+    #[tokio::test]
+    async fn long_lived_editor_is_handed_off_without_terminating_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("editor");
+        let pid_file = root.path().join("editor.pid");
+        std::fs::write(&program, "#!/usr/bin/env python3\nimport os,sys,time\nopen(sys.argv[1],'w').write(str(os.getpid()))\ntime.sleep(60)\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = spawn_editor(&program, &[pid_file.to_string_lossy().into_owned()]).unwrap();
+        let pid = editor_ready(&mut child, &pid_file).await;
+        let _fixture = FixtureEditor(pid);
+        observe_editor_handoff(child).await.unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    }
 
     #[test]
     fn gui_path_adds_installed_tools_after_inherited_paths() {

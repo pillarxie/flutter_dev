@@ -1,14 +1,17 @@
-pub use crate::build::{BuildConfiguration, BuildPreset, BuildSnapshot};
+pub use crate::build::{BuildConfiguration, BuildPreset, BuildSnapshot, BuildVersion};
 pub use crate::device::{DeviceInfo, EmulatorInfo};
 pub use crate::devtools::DevToolsPage;
 pub use crate::log::{LogEntry, LogPage};
 pub use crate::project::ProjectInfo;
+pub use crate::project_git::ProjectGitInfo;
 pub use crate::sdk::SdkInfo;
 pub use crate::session::{
     CoreEvent, CoreEventKind, DebugAction, DebugThread, EnvVar, JsonResponse, RunConfiguration,
     RunMode, SessionSnapshot, SessionState, SourceBreakpoint,
 };
 pub use crate::settings::AppSettings;
+pub use crate::test_runner::{TestResult, TestRunConfig, TestRunSnapshot, TestSelection};
+pub use crate::workspace::{ProjectRunState, RunProfile, WorkspacePreferences};
 use crate::{device::DeviceManager, session::Session};
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
@@ -26,6 +29,8 @@ use tokio::sync::{broadcast, watch, Mutex};
 struct Core {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     builds: crate::build::BuildManager,
+    tests: crate::test_runner::TestManager,
+    workspace_updates: Mutex<()>,
     devices: DeviceManager,
     devtools: crate::devtools::DevToolsManager,
     events: broadcast::Sender<CoreEvent>,
@@ -40,6 +45,8 @@ fn core() -> Arc<Core> {
         let core = Arc::new(Core {
             sessions: Mutex::new(HashMap::new()),
             builds: crate::build::BuildManager::default(),
+            tests: crate::test_runner::TestManager::default(),
+            workspace_updates: Mutex::new(()),
             devices: DeviceManager::new(events.clone()),
             devtools: crate::devtools::DevToolsManager::default(),
             events,
@@ -172,6 +179,12 @@ async fn session(id: &str) -> Result<Arc<Session>> {
 pub async fn discover_projects(root: String) -> Result<Vec<ProjectInfo>> {
     crate::project::discover_projects(root).await
 }
+pub async fn project_git_info(project_path: String) -> Result<Option<ProjectGitInfo>> {
+    crate::project_git::project_git_info(project_path).await
+}
+pub async fn switch_project_branch(project_path: String, branch: String) -> Result<ProjectGitInfo> {
+    crate::project_git::switch_project_branch(project_path, branch).await
+}
 pub async fn resolve_sdk(
     project_path: Option<String>,
     explicit_path: Option<String>,
@@ -196,11 +209,59 @@ pub async fn set_workspace_projects(
 ) -> Result<AppSettings> {
     crate::settings::set_workspace_projects(projects, selected_project_path).await
 }
+pub async fn set_workspace_preferences(preferences: WorkspacePreferences) -> Result<AppSettings> {
+    let core = core();
+    let _update = core.workspace_updates.lock().await;
+    let settings = crate::settings::set_workspace_preferences(preferences).await?;
+    let sessions: Vec<_> = core.sessions.lock().await.values().cloned().collect();
+    for session in sessions {
+        let path = session.snapshot.lock().await.project_path.clone();
+        let enabled = settings
+            .workspace_preferences
+            .project_states
+            .iter()
+            .any(|state| state.project_path == path && state.auto_reload);
+        session.set_auto_reload(enabled);
+    }
+    Ok(settings)
+}
+pub async fn open_source_location(
+    project_path: String,
+    path: String,
+    line: u32,
+    column: u32,
+) -> Result<()> {
+    crate::workspace::open_source_location(project_path, path, line, column).await
+}
+pub async fn discover_test_files(project_path: String) -> Result<Vec<String>> {
+    crate::test_runner::discover_test_files(project_path).await
+}
+pub async fn start_test_run(config: TestRunConfig) -> Result<TestRunSnapshot> {
+    core().tests.start(config).await
+}
+pub async fn test_run_snapshot(run_id: String) -> Result<TestRunSnapshot> {
+    core().tests.snapshot(&run_id).await
+}
+pub async fn list_test_runs() -> Vec<TestRunSnapshot> {
+    core().tests.list().await
+}
+pub async fn read_test_logs(run_id: String, after_id: u64, limit: u32) -> Result<LogPage> {
+    core().tests.logs(&run_id, after_id, limit).await
+}
+pub async fn stop_test_run(run_id: String) -> Result<()> {
+    core().tests.stop(&run_id).await
+}
 pub async fn start_build(config: BuildConfiguration) -> Result<BuildSnapshot> {
     core().builds.start(config).await
 }
+pub async fn read_build_version(project_path: String, args: Vec<String>) -> Result<BuildVersion> {
+    crate::build::read_build_version(project_path, args).await
+}
 pub async fn build_snapshot(build_id: String) -> Result<BuildSnapshot> {
     core().builds.snapshot(&build_id).await
+}
+pub async fn list_builds() -> Vec<BuildSnapshot> {
+    core().builds.list().await
 }
 pub async fn read_build_logs(build_id: String, after_id: u64, limit: u32) -> Result<LogPage> {
     core().builds.logs(&build_id, after_id, limit).await
@@ -230,6 +291,34 @@ pub async fn start_session(config: RunConfiguration) -> Result<SessionSnapshot> 
         bail!("Invalid environment variable");
     }
     let core = core();
+    // iOS SDK log readers identify apps by executable name (often Runner).
+    // Resolve the target platform from the selected SDK, never from its ID.
+    let isolate_device_logs = core
+        .devices
+        .devices(&config.sdk_path)
+        .await
+        .map_err(|error| anyhow!("SDK device discovery failed: {error}"))
+        .and_then(|devices| {
+            devices
+                .iter()
+                .find(|device| device.id == config.device_id)
+                .map(|device| {
+                    device.platform_type.as_deref() == Some("ios")
+                        || device.platform.starts_with("ios")
+                })
+                .ok_or_else(|| anyhow!("Selected SDK device is no longer available"))
+        });
+    let update = core.workspace_updates.lock().await;
+    let auto_reload = crate::settings::get_app_settings()
+        .await
+        .map(|settings| {
+            settings
+                .workspace_preferences
+                .project_states
+                .iter()
+                .any(|state| state.project_path == config.project_path && state.auto_reload)
+        })
+        .unwrap_or(false);
     let mut sessions = core.sessions.lock().await;
     // Retain only a small recent history; each session has its own bounded logs.
     if sessions.len() >= 32 {
@@ -254,9 +343,12 @@ pub async fn start_session(config: RunConfiguration) -> Result<SessionSnapshot> 
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
         core.ids.fetch_add(1, Ordering::Relaxed)
     );
-    let session = Session::new(id.clone(), config, core.events.clone());
+    let session = Session::new(id.clone(), config, core.events.clone(), isolate_device_logs);
+    session.set_auto_reload(auto_reload);
+    crate::auto_reload::start(session.clone());
     sessions.insert(id, session.clone());
     drop(sessions);
+    drop(update);
     session.emit(CoreEventKind::State, None).await;
     let snapshot = session.snapshot.lock().await.clone();
     let runner = session.clone();
@@ -571,6 +663,7 @@ pub async fn shutdown_core() -> Result<()> {
     cancel_event_subscription().await?;
     let core = core();
     core.builds.shutdown().await;
+    core.tests.shutdown().await;
     let sessions: Vec<_> = core.sessions.lock().await.values().cloned().collect();
     for session in sessions {
         let _ = session.stop().await;
@@ -641,7 +734,12 @@ mod network_tests {
     #[tokio::test]
     async fn requires_active_debugging_and_connected_vm_service() {
         let (events, _) = broadcast::channel(10);
-        let session = Session::new("network-validation".into(), configuration(), events);
+        let session = Session::new(
+            "network-validation".into(),
+            configuration(),
+            events,
+            Ok(false),
+        );
         let mut snapshot = session.snapshot.lock().await.clone();
         snapshot.state = SessionState::Running;
         assert!(validate_network_session(&snapshot)
@@ -693,7 +791,7 @@ mod network_tests {
         config.sdk_path = sdk.path().to_string_lossy().into_owned();
         config.project_path = config.sdk_path.clone();
         let (events, _) = broadcast::channel(100);
-        let session = Session::new("network-forward".into(), config, events);
+        let session = Session::new("network-forward".into(), config, events, Ok(false));
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
         tokio::time::timeout(Duration::from_secs(5), async {

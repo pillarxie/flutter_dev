@@ -24,13 +24,25 @@ void main() {
       StreamSubscription<CoreEvent>? subscription;
       try {
         await File('${directory.path}/pubspec.yaml').writeAsString(
-          'name: bridge_sample\ndependencies:\n  flutter:\n    sdk: flutter\n',
+          'name: bridge_sample\nversion: 1.2.3+42\ndependencies:\n  flutter:\n    sdk: flutter\n',
         );
         await Directory('${directory.path}/lib').create();
         final source = File('${directory.path}/lib/main.dart');
         await source.writeAsString('void main() {\n  print("你好 🦀");\n}\n');
         final projects = await api.discoverProjects(root: directory.path);
         expect(projects.single.name, 'bridge_sample');
+        final projectVersion = await api.readBuildVersion(
+          projectPath: directory.path,
+          args: const [],
+        );
+        expect(projectVersion.buildName, '1.2.3');
+        expect(projectVersion.buildNumber, '42');
+        final overriddenVersion = await api.readBuildVersion(
+          projectPath: directory.path,
+          args: const ['--build-name=2.4.6', '--build-number', '99'],
+        );
+        expect(overriddenVersion.buildName, '2.4.6');
+        expect(overriddenVersion.buildNumber, '99');
         await expectLater(
           api.openDevtools(sessionId: 'missing', module: 'memory'),
           throwsA(predicate((error) => '$error'.contains('Unknown session'))),
@@ -182,13 +194,31 @@ void main() {
             projectPath: directory.path,
             sdkPath: sdkDirectory.path,
             target: 'bundle',
-            args: const ['--debug'],
+            args: const ['--debug', '--build-number=77'],
             outputDirectory: null,
           ),
+        );
+        expect(startedBuild.version!.buildName, '1.2.3');
+        expect(startedBuild.version!.buildNumber, '77');
+        await File('${directory.path}/pubspec.yaml').writeAsString(
+          'name: bridge_sample\nversion: 9.9.9+9\ndependencies:\n  flutter:\n    sdk: flutter\n',
         );
         final failedBuild = await waitForBuildTerminal(startedBuild.id);
         expect(failedBuild.state, 'failed');
         expect(failedBuild.exitCode, 23);
+        final builds = await api.listBuilds();
+        expect(builds.single.id, startedBuild.id);
+        expect(builds.single.state, 'failed');
+        expect(builds.single.exitCode, 23);
+        expect(builds.single.version!.buildName, '1.2.3');
+        expect(builds.single.version!.buildNumber, '77');
+        expect(failedBuild.version!.buildNumber, '77');
+        final nextVersion = await api.readBuildVersion(
+          projectPath: directory.path,
+          args: const [],
+        );
+        expect(nextVersion.buildName, '9.9.9');
+        expect(nextVersion.buildNumber, '9');
         final buildLogs = await api.readBuildLogs(
           buildId: startedBuild.id,
           afterId: 0,
@@ -238,6 +268,7 @@ void main() {
           isTrue,
         );
         await api.shutdownCore();
+        expect(await api.listBuilds(), isEmpty);
         await api.setDefaultSdk(path: null);
         expect((await api.getAppSettings()).defaultSdkPath, isNull);
         expect((await api.getAppSettings()).themeMode, 'light');

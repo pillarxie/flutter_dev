@@ -53,6 +53,7 @@ impl DeviceManager {
             &HashMap::new(),
             WireProtocol::Daemon,
             None,
+            false,
         )?;
         let mut receiver = peer.events.subscribe();
         let events = self.events.clone();

@@ -2,6 +2,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/presentation/workbench_models.dart';
+import 'editor_settings_card.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -10,12 +11,15 @@ class SettingsPage extends StatefulWidget {
     required this.onSaved,
     required this.themeMode,
     required this.onThemeChanged,
+    this.onEditorSaved,
   });
 
   final WorkbenchBridge bridge;
   final ValueChanged<AppSettings> onSaved;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeChanged;
+  final Future<void> Function(String executable, List<String> arguments)?
+  onEditorSaved;
 
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -379,6 +383,12 @@ class _SettingsPageState extends State<SettingsPage> {
                       ],
                     ),
                   ),
+                  const SizedBox(height: 24),
+                  if (_settings != null)
+                    EditorSettingsCard(
+                      bridge: widget.bridge,
+                      onSave: widget.onEditorSaved,
+                    ),
                   const SizedBox(height: 14),
                   Container(
                     width: double.infinity,

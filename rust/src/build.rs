@@ -45,6 +45,160 @@ pub struct BuildSnapshot {
     pub output_directory: Option<String>,
     pub error: Option<String>,
     pub exit_code: Option<i32>,
+    pub version: Option<BuildVersion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildVersion {
+    pub build_name: Option<String>,
+    pub build_number: Option<String>,
+}
+
+pub async fn read_build_version(project_path: String, args: Vec<String>) -> Result<BuildVersion> {
+    validate_args(&args, None)?;
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let path = Path::new(&project_path).join("pubspec.yaml");
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("Read build version from {}", path.display()))?;
+        let mut content = Vec::new();
+        file.take(1024 * 1024 + 1).read_to_end(&mut content)?;
+        anyhow::ensure!(
+            content.len() <= 1024 * 1024,
+            "Project pubspec exceeds build version size limit"
+        );
+        let manifest: serde_yaml::Value =
+            serde_yaml::from_slice(&content).context("Invalid project pubspec YAML")?;
+        let manifest = manifest
+            .as_mapping()
+            .context("Project pubspec must contain a YAML mapping")?;
+        let version = manifest.get("version").and_then(serde_yaml::Value::as_str);
+        Ok(build_version(version, &args))
+    })
+    .await?
+}
+
+fn build_version(version: Option<&str>, args: &[String]) -> BuildVersion {
+    // Match FlutterManifest's '+' split without inventing platform-specific defaults.
+    let mut components = version
+        .filter(|version| valid_manifest_version(version))
+        .unwrap_or_default()
+        .split('+');
+    let mut version = BuildVersion {
+        build_name: components
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        build_number: components
+            .next()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    };
+    let mut arguments = args.iter();
+    while let Some(arg) = arguments.next() {
+        if arg == "--" {
+            break;
+        }
+        let (name, inline_value) = arg
+            .split_once('=')
+            .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
+        let destination = match name {
+            "--build-name" => Some(&mut version.build_name),
+            "--build-number" => Some(&mut version.build_number),
+            _ => None,
+        };
+        if let Some(destination) = destination {
+            let value = inline_value.or_else(|| arguments.next().map(String::as_str));
+            if let Some(value) = value {
+                *destination = (!value.is_empty()).then(|| value.to_owned());
+            }
+        } else if inline_value.is_none()
+            && matches!(
+                name,
+                "--dart-define"
+                    | "--dart-defines"
+                    | "-D"
+                    | "--dart-define-from-file"
+                    | "--flavor"
+                    | "--target"
+                    | "-t"
+                    | "--output"
+                    | "--output-dir"
+                    | "-o"
+                    | "--target-platform"
+                    | "--target-arch"
+                    | "--target-sysroot"
+                    | "--asset-dir"
+                    | "--depfile"
+                    | "--split-debug-info"
+                    | "--packages"
+                    | "--filesystem-root"
+                    | "--filesystem-scheme"
+                    | "--extra-front-end-options"
+                    | "--extra-gen-snapshot-options"
+                    | "--enable-experiment"
+                    | "--performance-measurement-file"
+                    | "--code-size-directory"
+                    | "--export-options-plist"
+                    | "--export-method"
+                    | "--base-href"
+                    | "--pwa-strategy"
+                    | "--static-assets-url"
+                    | "--optimization-level"
+                    | "-O"
+                    | "--dart2js-optimization"
+                    | "--web-renderer"
+                    | "--web-browser-flag"
+                    | "--web-header"
+                    | "--web-hostname"
+                    | "--web-port"
+                    | "--android-project-arg"
+                    | "-P"
+                    | "--android-project-cache-dir"
+                    | "--frontend-server-starter-path"
+                    | "--initialize-from-dill"
+                    | "--native-assets-yaml-file"
+            )
+        {
+            // An option's value can itself begin with '--'; it is still not a version flag.
+            let _ = arguments.next();
+        }
+    }
+    version
+}
+
+fn valid_manifest_version(version: &str) -> bool {
+    // pub_semver's completeVersion requires three numeric parts, followed by
+    // optional dot-separated ASCII prerelease/build identifiers. Leading zeros
+    // are accepted by Flutter, and the original spelling is preserved.
+    let identifiers = |value: &str| {
+        value.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    };
+    let (name, build) = version
+        .split_once('+')
+        .map_or((version, None), |(name, build)| (name, Some(build)));
+    if build.is_some_and(|build| !identifiers(build)) {
+        return false;
+    }
+    let (core, prerelease) = name
+        .split_once('-')
+        .map_or((name, None), |(core, prerelease)| (core, Some(prerelease)));
+    if prerelease.is_some_and(|prerelease| !identifiers(prerelease)) {
+        return false;
+    }
+    let mut parts = core.split('.');
+    (0..3).all(|_| {
+        parts.next().is_some_and(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part.parse::<i64>().is_ok()
+        })
+    }) && parts.next().is_none()
 }
 
 pub fn default_build_presets() -> Vec<BuildPreset> {
@@ -168,6 +322,7 @@ impl BuildManager {
             "Build project has no pubspec.yaml"
         );
         config.project_path = project.to_string_lossy().into_owned();
+        let version = read_build_version(config.project_path.clone(), config.args.clone()).await;
         let mut builds = self.builds.lock().await;
         for build in builds.values() {
             let snapshot = build.snapshot.lock().await;
@@ -201,12 +356,20 @@ impl BuildManager {
             output_directory: None,
             error: None,
             exit_code: None,
+            version: version.as_ref().ok().cloned(),
         };
         let (cancel, _) = watch::channel(false);
         let (done, _) = watch::channel(false);
+        let mut logs = LogBuffer::new(5000, 2 * 1024 * 1024);
+        if let Err(error) = version {
+            logs.push(
+                "system",
+                &format!("Could not read build version: {error:#}"),
+            );
+        }
         let build = Arc::new(Build {
             snapshot: Mutex::new(snapshot.clone()),
-            logs: Mutex::new(LogBuffer::new(5000, 2 * 1024 * 1024)),
+            logs: Mutex::new(logs),
             artifact: Mutex::new(None),
             cancel,
             done,
@@ -230,6 +393,24 @@ impl BuildManager {
 
     pub async fn snapshot(&self, id: &str) -> Result<BuildSnapshot> {
         Ok(self.get(id).await?.snapshot.lock().await.clone())
+    }
+
+    pub async fn list(&self) -> Vec<BuildSnapshot> {
+        let builds: Vec<_> = self.builds.lock().await.values().cloned().collect();
+        let mut snapshots = Vec::with_capacity(builds.len());
+        for build in builds {
+            snapshots.push(build.snapshot.lock().await.clone());
+        }
+        snapshots.sort_unstable_by_key(|snapshot| {
+            std::cmp::Reverse(
+                snapshot
+                    .id
+                    .strip_prefix("build-")
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .unwrap_or(0),
+            )
+        });
+        snapshots
     }
 
     pub async fn logs(&self, id: &str, after_id: u64, limit: u32) -> Result<LogPage> {
@@ -705,6 +886,240 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[tokio::test]
+    async fn build_version_reads_yaml_quotes_optional_number_and_missing_fields() {
+        let fixture = tempfile::tempdir().unwrap();
+        for (manifest, build_name, build_number) in [
+            (
+                "name: fixture\nversion: 1.2.3+42\n",
+                Some("1.2.3"),
+                Some("42"),
+            ),
+            (
+                "version: '2.3.4-beta+007'\n",
+                Some("2.3.4-beta"),
+                Some("007"),
+            ),
+            ("version: \"3.4.5+12\"\n", Some("3.4.5"), Some("12")),
+            ("version: 4.5.6\n", Some("4.5.6"), None),
+            (
+                "version: 01.02.03-dev.01+build.007\n",
+                Some("01.02.03-dev.01"),
+                Some("build.007"),
+            ),
+            ("name: fixture\n", None, None),
+            ("version: null\n", None, None),
+            ("version: invalid+42\n", None, None),
+            ("version: 1.2.3+4+5\n", None, None),
+            ("version: 1.2.3-dev..1+42\n", None, None),
+            ("version: 1.2.3+\n", None, None),
+            ("version: 1.2\n", None, None),
+            ("version: [1, 2, 3]\n", None, None),
+            ("version: true\n", None, None),
+        ] {
+            fs::write(fixture.path().join("pubspec.yaml"), manifest).unwrap();
+            let version = read_build_version(fixture.path().to_string_lossy().into_owned(), vec![])
+                .await
+                .unwrap();
+            assert_eq!(
+                version,
+                BuildVersion {
+                    build_name: build_name.map(str::to_owned),
+                    build_number: build_number.map(str::to_owned)
+                },
+                "{manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_version_overrides_respect_values_repetition_and_end_of_options() {
+        let args = [
+            "--release",
+            "--build-name=2.0.0",
+            "--build-number",
+            "8",
+            "--build-name",
+            "3.0.0",
+            "--build-number=9",
+            "--dart-define",
+            "--build-name=not-a-version",
+            "--dart-define=--build-number=99",
+            "-D",
+            "--build-number=100",
+            "--flavor",
+            "--build-name=also-not-a-version",
+            "--target-sysroot",
+            "--build-name=not-the-sysroot",
+            "--static-assets-url",
+            "--build-number=not-the-assets-url",
+            "--optimization-level",
+            "--build-name=not-the-optimization-level",
+            "-O",
+            "--build-number=not-the-short-optimization-level",
+            "--",
+            "--build-name=4.0.0",
+            "--build-number",
+            "10",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            build_version(Some("1.0.0+7"), &args),
+            BuildVersion {
+                build_name: Some("3.0.0".into()),
+                build_number: Some("9".into())
+            }
+        );
+        assert_eq!(
+            build_version(None, &["--build-number=42".into()]),
+            BuildVersion {
+                build_name: None,
+                build_number: Some("42".into())
+            }
+        );
+        assert_eq!(
+            build_version(Some("1.0.0+7"), &["--build-name=2.0.0".into()]),
+            BuildVersion {
+                build_name: Some("2.0.0".into()),
+                build_number: Some("7".into())
+            }
+        );
+        let args = [
+            "--dart-define",
+            "--",
+            "--build-name=2.0.0",
+            "--",
+            "--build-number=99",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            build_version(Some("1.0.0+7"), &args),
+            BuildVersion {
+                build_name: Some("2.0.0".into()),
+                build_number: Some("7".into())
+            }
+        );
+        assert_eq!(
+            build_version(
+                Some("invalid+42"),
+                &[
+                    "--build-name=configured-by-cli".into(),
+                    "--build-number=43".into()
+                ]
+            ),
+            BuildVersion {
+                build_name: Some("configured-by-cli".into()),
+                build_number: Some("43".into())
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn build_version_bounds_reads_and_reports_invalid_or_missing_manifests() {
+        let fixture = tempfile::tempdir().unwrap();
+        let project = fixture.path().to_string_lossy().into_owned();
+        assert!(read_build_version(project.clone(), vec![]).await.is_err());
+        let pubspec = fixture.path().join("pubspec.yaml");
+        for content in ["version: [broken", "- invalid-root"] {
+            fs::write(&pubspec, content).unwrap();
+            assert!(
+                read_build_version(project.clone(), vec![]).await.is_err(),
+                "{content}"
+            );
+        }
+        let mut content = String::from("version: 1.2.3+4\n#");
+        content.push_str(&"x".repeat(1024 * 1024 - content.len()));
+        fs::write(&pubspec, &content).unwrap();
+        assert_eq!(
+            read_build_version(project.clone(), vec![])
+                .await
+                .unwrap()
+                .build_number
+                .as_deref(),
+            Some("4")
+        );
+        content.push('x');
+        fs::write(&pubspec, content).unwrap();
+        assert!(read_build_version(project, vec![])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("size limit"));
+    }
+
+    #[tokio::test]
+    async fn list_preserves_active_and_terminal_snapshots_across_projects_without_reading_logs() {
+        let manager = BuildManager::default();
+        assert!(manager.list().await.is_empty());
+        for (id, project, state, exit_code, error) in [
+            (2, "/fixture/project-a", "succeeded", Some(0), None),
+            (10, "/fixture/project-b", "running", None, None),
+            (
+                1,
+                "/fixture/project-a",
+                "failed",
+                Some(7),
+                Some("compile error"),
+            ),
+        ] {
+            let snapshot = BuildSnapshot {
+                id: format!("build-{id}"),
+                project_path: project.into(),
+                state: state.into(),
+                target: "web".into(),
+                output_directory: (state == "succeeded").then(|| "/fixture/output".into()),
+                error: error.map(str::to_owned),
+                exit_code,
+                version: None,
+            };
+            let (cancel, _) = watch::channel(false);
+            let (done, _) = watch::channel(state != "running");
+            manager.builds.lock().await.insert(
+                snapshot.id.clone(),
+                Arc::new(Build {
+                    snapshot: Mutex::new(snapshot),
+                    logs: Mutex::new(LogBuffer::new(10, 1024)),
+                    artifact: Mutex::new(None),
+                    cancel,
+                    done,
+                    opener: Arc::new(|_| panic!("Listing builds must not open output")),
+                }),
+            );
+        }
+        let active = manager.get("build-10").await.unwrap();
+        // Holding the log lock proves listing only accesses authoritative snapshots.
+        let _logs = active.logs.lock().await;
+        let snapshots = tokio::time::timeout(Duration::from_secs(1), manager.list())
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["build-10", "build-2", "build-1"]
+        );
+        assert_eq!(snapshots[0].project_path, "/fixture/project-b");
+        assert_eq!(snapshots[0].state, "running");
+        assert_eq!(snapshots[1].project_path, "/fixture/project-a");
+        assert_eq!(snapshots[1].state, "succeeded");
+        assert_eq!(
+            snapshots[1].output_directory.as_deref(),
+            Some("/fixture/output")
+        );
+        assert_eq!(snapshots[1].exit_code, Some(0));
+        assert_eq!(snapshots[2].state, "failed");
+        assert_eq!(snapshots[2].exit_code, Some(7));
+        assert_eq!(snapshots[2].error.as_deref(), Some("compile error"));
+        assert!(!*active.cancel.borrow());
+        assert!(!*active.done.borrow());
+        assert_eq!(manager.snapshot("build-10").await.unwrap().state, "running");
+    }
+
     fn config(project: &Path, sdk: Option<&Path>) -> BuildConfiguration {
         BuildConfiguration {
             project_path: project.to_string_lossy().into_owned(),
@@ -882,6 +1297,68 @@ print('fixture diagnostic',file=sys.stderr,flush=True)
         })
         .await
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_version_snapshot_is_frozen_at_start_after_pubspec_changes() {
+        let (_fixture, project, sdk) = fixture();
+        fs::write(
+            project.join("pubspec.yaml"),
+            "name: fixture\nversion: 1.2.3+42\n",
+        )
+        .unwrap();
+        let manager = manager(Arc::new(|_| Ok(())));
+        let mut configuration = config(&project, Some(&sdk));
+        configuration
+            .args
+            .extend(["--slow".into(), "--build-number=43".into()]);
+        let started = manager.start(configuration).await.unwrap();
+        let expected = Some(BuildVersion {
+            build_name: Some("1.2.3".into()),
+            build_number: Some("43".into()),
+        });
+        assert_eq!(started.version, expected);
+        fs::write(
+            project.join("pubspec.yaml"),
+            "name: fixture\nversion: 9.8.7+99\n",
+        )
+        .unwrap();
+        let preview = read_build_version(project.to_string_lossy().into_owned(), vec![])
+            .await
+            .unwrap();
+        assert_eq!(preview.build_name.as_deref(), Some("9.8.7"));
+        assert_eq!(
+            manager.snapshot(&started.id).await.unwrap().version,
+            expected
+        );
+        assert_eq!(manager.list().await[0].version, expected);
+        manager.stop(&started.id).await.unwrap();
+        assert_eq!(
+            manager.snapshot(&started.id).await.unwrap().version,
+            expected
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn build_version_read_errors_warn_without_blocking_flutter_build() {
+        let (_fixture, project, sdk) = fixture();
+        fs::write(project.join("pubspec.yaml"), "version: [invalid yaml").unwrap();
+        let manager = manager(Arc::new(|_| Ok(())));
+        let started = manager.start(config(&project, Some(&sdk))).await.unwrap();
+        assert!(started.version.is_none());
+        let finished = finish(&manager, &started.id).await;
+        assert_eq!(finished.state, "succeeded");
+        assert!(finished.version.is_none());
+        assert!(manager
+            .logs(&started.id, 0, 100)
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.category == "system"
+                && entry.text.contains("Could not read build version")));
     }
 
     #[cfg(unix)]

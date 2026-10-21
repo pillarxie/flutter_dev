@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_dev/core/presentation/workbench_models.dart';
@@ -90,6 +91,7 @@ Future<void> _mount(
   NetworkFake bridge, {
   Session? session = _session,
   Size size = const Size(1100, 900),
+  Brightness brightness = Brightness.light,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
@@ -97,7 +99,7 @@ Future<void> _mount(
   addTearDown(tester.view.resetDevicePixelRatio);
   await tester.pumpWidget(
     MaterialApp(
-      theme: workbenchTheme(Brightness.light),
+      theme: workbenchTheme(brightness),
       home: Scaffold(
         body: NetworkPanel(bridge: bridge, session: session),
       ),
@@ -250,7 +252,12 @@ void main() {
         find.byKey(const ValueKey('network-detail-tab-response')),
       );
       await tester.pump();
-      expect(find.text('{\n  "ok": true\n}'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey(r'network-payload-toggle-response-body-$')),
+        findsOneWidget,
+      );
+      expect(find.text('ok:'), findsOneWidget);
+      expect(find.text('true'), findsOneWidget);
       expect(find.text('响应 Headers'), findsOneWidget);
       await tester.tap(
         find.byKey(const ValueKey('network-detail-tab-parameters')),
@@ -335,7 +342,9 @@ void main() {
       bridge.handler = null;
       await tester.pump(const Duration(seconds: 5));
       expect(bridge.calls.length, count);
-      await tester.tap(find.byKey(const ValueKey('network-clear')));
+      await tester.tap(find.text('清空'));
+      await tester.pump();
+      expect(find.text('0 / 500 条'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('network-refresh')));
       await tester.pump();
       expect(find.byType(ListTile), findsNothing);
@@ -403,36 +412,44 @@ void main() {
     },
   );
 
-  testWidgets(
-    'narrow layout opens details with back navigation and errors recover',
-    (tester) async {
-      final bridge = NetworkFake();
-      await _mount(tester, bridge, size: const Size(420, 900));
-      await tester.tap(find.byType(ListTile));
-      await tester.pump();
-      await tester.pump();
-      expect(find.text('返回请求列表'), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await tester.tap(find.text('返回请求列表'));
-      await tester.pump();
-      await tester.enterText(
-        find.byKey(const ValueKey('network-search')),
-        'missing',
-      );
-      await tester.pump();
-      expect(find.text('没有匹配的请求'), findsOneWidget);
-      bridge.handler = (id, method, args) async => throw StateError('网络连接断开');
-      await tester.tap(find.byKey(const ValueKey('network-refresh')));
-      await tester.pump();
-      expect(find.textContaining('网络连接断开'), findsOneWidget);
-      bridge.handler = null;
-      await tester.tap(find.text('重试'));
-      await tester.pump();
-      expect(find.textContaining('网络连接断开'), findsNothing);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'narrow ${brightness.name} layout opens details with back navigation and errors recover',
+      (tester) async {
+        final bridge = NetworkFake();
+        await _mount(
+          tester,
+          bridge,
+          size: const Size(420, 900),
+          brightness: brightness,
+        );
+        expect(find.text('清空').hitTestable(), findsOneWidget);
+        await tester.tap(find.byType(ListTile));
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('返回请求列表'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.tap(find.text('返回请求列表'));
+        await tester.pump();
+        await tester.enterText(
+          find.byKey(const ValueKey('network-search')),
+          'missing',
+        );
+        await tester.pump();
+        expect(find.text('没有匹配的请求'), findsOneWidget);
+        bridge.handler = (id, method, args) async => throw StateError('网络连接断开');
+        await tester.tap(find.byKey(const ValueKey('network-refresh')));
+        await tester.pump();
+        expect(find.textContaining('网络连接断开'), findsOneWidget);
+        bridge.handler = null;
+        await tester.tap(find.text('重试'));
+        await tester.pump();
+        expect(find.textContaining('网络连接断开'), findsNothing);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
 
   testWidgets(
     'same URI hot restart invalidates pending profile and pause survives session updates',
@@ -546,6 +563,203 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     expect(bridge.calls, isEmpty);
     expect(find.textContaining('Debug 会话'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'method/status filters combine search and clear keeps filters at 560px ${brightness.name}',
+      (tester) async {
+        final bridge = NetworkFake();
+        final requests = [
+          {
+            ...bridge.ref,
+            'id': 'ok',
+            'method': 'GET',
+            'uri': 'https://example.test/ok',
+          },
+          {
+            ...bridge.ref,
+            'id': 'bad',
+            'uri': 'https://example.test/bad',
+            'response': {'statusCode': 404, 'endTime': 150},
+          },
+          {
+            ...bridge.ref,
+            'id': 'pending',
+            'uri': 'https://example.test/pending',
+            'response': <String, dynamic>{},
+          },
+          {
+            ...bridge.ref,
+            'id': 'failed',
+            'uri': 'https://example.test/failed',
+            'response': {'error': 'connection reset'},
+          },
+        ];
+        bridge.handler = (_, method, args) async =>
+            method == 'ext.dart.io.getHttpProfile'
+            ? {'timestamp': 200, 'requests': requests}
+            : bridge.response(method, args);
+        await _mount(
+          tester,
+          bridge,
+          size: const Size(560, 900),
+          brightness: brightness,
+        );
+        await tester.tap(find.byKey(const ValueKey('network-pause')));
+        expect(find.byType(ListTile), findsNWidgets(4));
+        Future<void> filter(String id, String value) async {
+          await tester.tap(find.byKey(ValueKey('network-filter-$id')));
+          await tester.pumpAndSettle();
+          await tester.tap(
+            find.widgetWithText(CheckedPopupMenuItem<String>, value),
+          );
+          await tester.pumpAndSettle();
+        }
+
+        await filter('method', 'POST');
+        expect(find.byType(ListTile), findsNWidgets(3));
+        await filter('status', '4xx');
+        expect(find.byType(ListTile), findsOneWidget);
+        await filter('status', '失败');
+        expect(find.byType(ListTile), findsNWidgets(2));
+        await tester.enterText(
+          find.byKey(const ValueKey('network-search')),
+          'bad',
+        );
+        await tester.pump();
+        expect(find.byType(ListTile), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('network-clear')));
+        await tester.pump();
+        expect(find.byType(ListTile), findsNothing);
+        expect(find.text('方法：POST'), findsOneWidget);
+        expect(find.text('状态：4xx、失败'), findsOneWidget);
+        await tester.tap(find.byKey(const ValueKey('network-reset-filters')));
+        await tester.pump();
+        expect(find.text('方法：全部'), findsOneWidget);
+        expect(find.text('状态：全部'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
+  testWidgets(
+    'right click copies detail on demand without changing selection and clear rejects late copies',
+    (tester) async {
+      final bridge = NetworkFake();
+      await _mount(tester, bridge);
+      await tester.tap(find.byKey(const ValueKey('network-pause')));
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      Future<void> openMenu() async {
+        await tester.tap(find.byType(ListTile), buttons: kSecondaryMouseButton);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('复制 cURL'));
+        await tester.pumpAndSettle();
+      }
+
+      await openMenu();
+      expect(copied, contains('--data-raw'));
+      expect(
+        copied,
+        contains(
+          "'https://example.test/search?q=%E4%B8%AD%E6%96%87&tag=one&tag=two'",
+        ),
+      );
+      expect(
+        find.byKey(const ValueKey('network-details-isolates/1/request-1')),
+        findsNothing,
+      );
+      expect(
+        bridge.calls.where(
+          (call) => call.method == 'ext.dart.io.getHttpProfileRequest',
+        ),
+        hasLength(1),
+      );
+      final pending = Completer<Map<String, dynamic>>();
+      bridge.handler = (_, method, args) async =>
+          method == 'ext.dart.io.getHttpProfileRequest'
+          ? pending.future
+          : bridge.response(method, args);
+      copied = null;
+      await openMenu();
+      await tester.tap(find.byKey(const ValueKey('network-clear')));
+      pending.complete(
+        bridge.response('ext.dart.io.getHttpProfileRequest', {}),
+      );
+      await tester.pumpAndSettle();
+      expect(copied, isNull);
+      expect(find.byType(ListTile), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets('late cURL detail never replaces a newly selected request', (
+    tester,
+  ) async {
+    final bridge = NetworkFake();
+    final pending = Completer<Map<String, dynamic>>();
+    final second = {
+      ...bridge.ref,
+      'id': 'second',
+      'uri': 'https://second.test/',
+    };
+    bridge.handler = (_, method, args) async {
+      if (method == 'ext.dart.io.getHttpProfile') {
+        return {
+          'timestamp': 200,
+          'requests': [bridge.ref, second],
+        };
+      }
+      if (method == 'ext.dart.io.getHttpProfileRequest') {
+        if (args['id'] == 'request-1') return pending.future;
+        return {...bridge.response(method, args), ...second};
+      }
+      return bridge.response(method, args);
+    };
+    await _mount(tester, bridge);
+    await tester.tap(find.byKey(const ValueKey('network-pause')));
+    await tester.tap(
+      find.byKey(const ValueKey('network-request-isolates/1/request-1')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('复制 cURL'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('network-request-isolates/1/second')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('network-details-isolates/1/second')),
+      findsOneWidget,
+    );
+    pending.complete(bridge.response('ext.dart.io.getHttpProfileRequest', {}));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('network-details-isolates/1/second')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('network-details-isolates/1/request-1')),
+      findsNothing,
+    );
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
 }

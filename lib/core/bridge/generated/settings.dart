@@ -7,6 +7,8 @@ import 'build.dart';
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'project.dart';
+import 'session.dart';
+import 'workspace.dart';
 
 class AppSettings {
   final String? defaultSdkPath;
@@ -14,6 +16,7 @@ class AppSettings {
   final List<BuildPreset> buildPresets;
   final List<ProjectInfo> projects;
   final String? selectedProjectPath;
+  final WorkspacePreferences workspacePreferences;
 
   const AppSettings({
     this.defaultSdkPath,
@@ -21,6 +24,7 @@ class AppSettings {
     required this.buildPresets,
     required this.projects,
     this.selectedProjectPath,
+    required this.workspacePreferences,
   });
 
   @override
@@ -29,7 +33,8 @@ class AppSettings {
       themeMode.hashCode ^
       buildPresets.hashCode ^
       projects.hashCode ^
-      selectedProjectPath.hashCode;
+      selectedProjectPath.hashCode ^
+      workspacePreferences.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -40,5 +45,6 @@ class AppSettings {
           themeMode == other.themeMode &&
           buildPresets == other.buildPresets &&
           projects == other.projects &&
-          selectedProjectPath == other.selectedProjectPath;
+          selectedProjectPath == other.selectedProjectPath &&
+          workspacePreferences == other.workspacePreferences;
 }

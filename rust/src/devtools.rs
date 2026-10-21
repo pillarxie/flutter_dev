@@ -404,6 +404,7 @@ mod tests {
                 dart_defines: vec![],
             },
             events,
+            Ok(false),
         )
     }
 
