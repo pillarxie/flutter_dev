@@ -55,7 +55,13 @@ void main() {
           '${directory.path}/apps/sample',
         ).create(recursive: true);
         final initial = await api.projectGitInfo(projectPath: nested.path);
-        expect(initial!.repositoryRoot, await directory.resolveSymbolicLinks());
+        expect(
+          await FileSystemEntity.identical(
+            initial!.repositoryRoot,
+            directory.path,
+          ),
+          isTrue,
+        );
         expect(initial.branches, containsAll(['main', 'feature/中文']));
         expect(initial.headCommit, isNotEmpty);
 

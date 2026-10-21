@@ -163,13 +163,13 @@ async fn git(root: &Path, args: &[&str]) -> Result<GitOutput> {
         "--no-pager".into(),
         "--no-optional-locks".into(),
         "-c".into(),
-        format!("core.hooksPath={}", hooks.path().display()),
+        format!("core.hooksPath={}", git_path(hooks.path())),
         "-c".into(),
         "core.fsmonitor=false".into(),
         "--git-dir".into(),
-        root.join(".git").to_string_lossy().into_owned(),
+        git_path(&root.join(".git")),
         "--work-tree".into(),
-        root.to_string_lossy().into_owned(),
+        git_path(root),
     ];
     arguments.extend(args.iter().map(|arg| (*arg).to_owned()));
     let environment = HashMap::from([
@@ -207,6 +207,27 @@ async fn git(root: &Path, args: &[&str]) -> Result<GitOutput> {
     }
 }
 
+// Rust canonicalization uses Windows verbatim paths, which Git does not accept
+// in --git-dir/--work-tree. Keep canonical paths for filesystem access and API
+// results; convert only command arguments, including verbatim UNC shares.
+fn git_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{share}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\") {
+        let bytes = drive.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return drive.to_owned();
+        }
+    }
+    path.into_owned()
+}
+
 async fn read_output(reader: impl AsyncRead + Unpin, limit: usize) -> Result<String> {
     let mut bytes = Vec::new();
     reader
@@ -223,6 +244,23 @@ async fn read_output(reader: impl AsyncRead + Unpin, limit: usize) -> Result<Str
 mod tests {
     use super::*;
     use std::{fs, process::Command};
+
+    #[test]
+    fn git_arguments_convert_verbatim_drive_and_unc_paths_only() {
+        for (input, expected) in [
+            (r"\\?\C:\项目\repo\.git", r"C:\项目\repo\.git"),
+            (
+                r"\\?\UNC\server\share\项目\repo",
+                r"\\server\share\项目\repo",
+            ),
+            (r"C:\project\repo", r"C:\project\repo"),
+            (r"\\server\share\repo", r"\\server\share\repo"),
+            ("/tmp/project/repo", "/tmp/project/repo"),
+            (r"\\?\Volume{example}\repo", r"\\?\Volume{example}\repo"),
+        ] {
+            assert_eq!(git_path(Path::new(input)), expected);
+        }
+    }
 
     struct Repository(tempfile::TempDir);
 
@@ -290,6 +328,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(direct, nested);
+        assert_eq!(
+            direct.repository_root,
+            repo.path().canonicalize().unwrap().to_string_lossy()
+        );
         assert_eq!(direct.current_branch.as_deref(), Some("main"));
         assert_eq!(direct.branches, ["feature/nested", "main"]);
         assert_eq!(
