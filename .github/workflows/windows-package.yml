@@ -52,7 +52,7 @@ jobs:
               if (-not (Test-Path (Join-Path $installDir $file))) { throw "Installed file missing: $file" }
             }
             $nativeLibrary = Join-Path $installDir 'flutter_dev_core.dll'
-            flutter test test/project_git_native_test.dart "--dart-define=FLUTTER_DEV_NATIVE_LIBRARY=$nativeLibrary"
+            flutter test test/native_bridge_test.dart test/project_git_native_test.dart "--dart-define=FLUTTER_DEV_NATIVE_LIBRARY=$nativeLibrary"
             if ($LASTEXITCODE -ne 0) { throw 'Installed Rust core FFI check failed.' }
             $app = Start-Process -FilePath (Join-Path $installDir 'flutter_dev.exe') -WorkingDirectory $installDir -PassThru
             Start-Sleep -Seconds 10

@@ -99,7 +99,13 @@ void main() {
           expect(chmod.exitCode, 0);
         }
         final saved = await api.setDefaultSdk(path: sdkDirectory.path);
-        expect(saved.defaultSdkPath, await sdkDirectory.resolveSymbolicLinks());
+        expect(
+          await FileSystemEntity.identical(
+            saved.defaultSdkPath!,
+            sdkDirectory.path,
+          ),
+          isTrue,
+        );
         expect(saved.themeMode, 'dark');
         final light = await api.setThemeMode(mode: 'light');
         expect(light.themeMode, 'light');
@@ -186,7 +192,7 @@ void main() {
         // The build fixture fails deliberately, avoiding an actual desktop opener.
         await program.writeAsString(
           Platform.isWindows
-              ? '@echo off\r\nif "%1"=="--version" (\r\necho $version\r\nexit /b 0\r\n)\r\necho build fixture failed 1>&2\r\nexit /b 23\r\n'
+              ? '@echo off\r\nif "%~1"=="--version" (\r\necho $version\r\nexit /b 0\r\n)\r\necho build fixture failed 1>&2\r\nexit /b 23\r\n'
               : '#!/bin/sh\nif [ "\$1" = "--version" ]; then\nprintf \'%s\\n\' \'$version\'\nexit 0\nfi\nprintf \'%s\\n\' \'build fixture failed\' >&2\nexit 23\n',
         );
         final startedBuild = await api.startBuild(

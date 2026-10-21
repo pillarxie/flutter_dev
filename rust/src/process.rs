@@ -59,6 +59,13 @@ impl OwnedProcess {
             command.env_remove(variable);
         }
         if let Some(cwd) = cwd {
+            #[cfg(windows)]
+            if is_batch_program(program) {
+                command.current_dir(command_path(cwd));
+            } else {
+                command.current_dir(cwd);
+            }
+            #[cfg(not(windows))]
             command.current_dir(cwd);
         }
         #[cfg(unix)]
@@ -212,12 +219,17 @@ async fn observe_editor_handoff(mut child: Child) -> Result<()> {
     Ok(())
 }
 
-fn command(program: &Path, args: &[String]) -> Result<Command> {
-    #[cfg(windows)]
-    if program.extension().is_some_and(|ext| {
+#[cfg(windows)]
+fn is_batch_program(program: &Path) -> bool {
+    program.extension().is_some_and(|ext| {
         ext.to_string_lossy().eq_ignore_ascii_case("bat")
             || ext.to_string_lossy().eq_ignore_ascii_case("cmd")
-    }) {
+    })
+}
+
+fn command(program: &Path, args: &[String]) -> Result<Command> {
+    #[cfg(windows)]
+    if is_batch_program(program) {
         use std::os::windows::process::CommandExt;
         // cmd performs expansion even inside quotes. Reject expandable shell syntax rather than
         // silently allowing launch arguments to become commands or environment substitutions.
@@ -232,7 +244,7 @@ fn command(program: &Path, args: &[String]) -> Result<Command> {
         }
         let quoted = values
             .iter()
-            .map(|value| format!("\"{value}\""))
+            .map(|value| format!("\"{}\"", command_path(Path::new(value))))
             .collect::<Vec<_>>()
             .join(" ");
         let mut command = Command::new("cmd.exe");
@@ -243,6 +255,27 @@ fn command(program: &Path, args: &[String]) -> Result<Command> {
     let mut command = Command::new(program);
     command.args(args);
     Ok(command)
+}
+
+// Git and cmd.exe do not accept Rust's canonical Windows verbatim paths.
+// Convert external command paths only; filesystem paths and API results retain
+// their canonical representation. Non-path arguments remain unchanged.
+pub(crate) fn command_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{share}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\") {
+        let bytes = drive.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return drive.to_owned();
+        }
+    }
+    path.into_owned()
 }
 
 fn configure_environment(command: &mut Command, env: &HashMap<String, String>) -> Result<()> {
@@ -454,6 +487,75 @@ mod windows_job {
             return Err(error).context("Resume owned Windows process");
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::fs;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn canonical_batch_paths_and_working_directory_preserve_output_and_exit_status() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("batch 空格");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("relative.txt"), "fixture").unwrap();
+        let input = root.join("参数 file.txt");
+        fs::write(&input, "fixture").unwrap();
+        let cwd = root.canonicalize().unwrap();
+        let args = [
+            input.canonicalize().unwrap().to_string_lossy().into_owned(),
+            "literal/name=value".into(),
+        ];
+        for extension in ["bat", "cmd"] {
+            let program = root.join(format!("probe script.{extension}"));
+            fs::write(
+                &program,
+                "@echo off\r\nif not exist \"%~1\" exit /b 21\r\nif not exist \"relative.txt\" exit /b 22\r\necho path-ok\r\necho %~2\r\nexit /b 7\r\n",
+            )
+            .unwrap();
+            let mut process = OwnedProcess::spawn(
+                &program.canonicalize().unwrap(),
+                &args,
+                Some(&cwd),
+                &HashMap::new(),
+            )
+            .unwrap();
+            process.stdin.take();
+            let mut stdout = process.stdout.take().unwrap();
+            let (output, status) = tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::try_join!(
+                    async {
+                        let mut output = String::new();
+                        stdout.read_to_string(&mut output).await?;
+                        Ok::<_, std::io::Error>(output)
+                    },
+                    async { process.wait().await.map_err(std::io::Error::other) },
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(status.code(), Some(7));
+            assert_eq!(
+                output.lines().collect::<Vec<_>>(),
+                ["path-ok", "literal/name=value"]
+            );
+        }
+    }
+
+    #[test]
+    fn batch_commands_still_reject_shell_expansion_and_metacharacters() {
+        let program = Path::new(r"\\?\C:\SDK folder\flutter.bat");
+        for character in ['"', '%', '!', '\r', '\n', '&', '|', '<', '>', '^'] {
+            let error = command(program, &[format!("unsafe{character}value")])
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("unsupported shell characters"));
+        }
+        assert!(command(Path::new(r"C:\unsafe&folder\flutter.bat"), &[]).is_err());
     }
 }
 

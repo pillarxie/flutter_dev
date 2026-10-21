@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::process::OwnedProcess;
+use crate::process::{command_path, OwnedProcess};
 
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 const ERROR_LIMIT: usize = 64 * 1024;
@@ -163,13 +163,13 @@ async fn git(root: &Path, args: &[&str]) -> Result<GitOutput> {
         "--no-pager".into(),
         "--no-optional-locks".into(),
         "-c".into(),
-        format!("core.hooksPath={}", git_path(hooks.path())),
+        format!("core.hooksPath={}", command_path(hooks.path())),
         "-c".into(),
         "core.fsmonitor=false".into(),
         "--git-dir".into(),
-        git_path(&root.join(".git")),
+        command_path(&root.join(".git")),
         "--work-tree".into(),
-        git_path(root),
+        command_path(root),
     ];
     arguments.extend(args.iter().map(|arg| (*arg).to_owned()));
     let environment = HashMap::from([
@@ -207,27 +207,6 @@ async fn git(root: &Path, args: &[&str]) -> Result<GitOutput> {
     }
 }
 
-// Rust canonicalization uses Windows verbatim paths, which Git does not accept
-// in --git-dir/--work-tree. Keep canonical paths for filesystem access and API
-// results; convert only command arguments, including verbatim UNC shares.
-fn git_path(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
-        return format!(r"\\{share}");
-    }
-    if let Some(drive) = path.strip_prefix(r"\\?\") {
-        let bytes = drive.as_bytes();
-        if bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'\\' | b'/')
-        {
-            return drive.to_owned();
-        }
-    }
-    path.into_owned()
-}
-
 async fn read_output(reader: impl AsyncRead + Unpin, limit: usize) -> Result<String> {
     let mut bytes = Vec::new();
     reader
@@ -258,7 +237,7 @@ mod tests {
             ("/tmp/project/repo", "/tmp/project/repo"),
             (r"\\?\Volume{example}\repo", r"\\?\Volume{example}\repo"),
         ] {
-            assert_eq!(git_path(Path::new(input)), expected);
+            assert_eq!(command_path(Path::new(input)), expected);
         }
     }
 
