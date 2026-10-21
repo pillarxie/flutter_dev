@@ -355,6 +355,10 @@ fn expand_path(value: &str, project: Option<&Path>) -> Result<PathBuf> {
     if value.contains("${") {
         bail!("Unsupported variable in SDK path");
     }
+    // Placeholder values may contain a canonical Windows verbatim prefix.
+    // Unlike ordinary Win32 paths, that namespace does not translate '/'.
+    #[cfg(windows)]
+    let value = value.replace('/', "\\");
     let path = PathBuf::from(value);
     Ok(if path.is_relative() {
         project.unwrap_or(Path::new(".")).join(path)
@@ -434,6 +438,20 @@ fn strip_json_comments(input: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_placeholder_sdk_paths_resolve_to_existing_directories() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let sdk = root.join("SDK 中文");
+        fs::create_dir(&sdk).unwrap();
+        let expanded = expand_path("${workspaceFolder}/SDK 中文", Some(&root)).unwrap();
+        assert_eq!(expanded, sdk);
+        assert_eq!(
+            expanded.canonicalize().unwrap(),
+            sdk.canonicalize().unwrap()
+        );
+    }
 
     #[test]
     fn package_inherits_nearest_monorepo_fvm_before_global_sdk() {

@@ -360,11 +360,11 @@ pub async fn open_source_location(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn profile() -> RunProfile {
+    fn profile(project: &Path) -> RunProfile {
         RunProfile {
             id: "development".into(),
             name: "Development".into(),
-            project_path: "/project".into(),
+            project_path: project.to_string_lossy().into_owned(),
             sdk_path: None,
             device_id: None,
             platform: None,
@@ -382,11 +382,12 @@ mod tests {
     }
     #[test]
     fn validates_profiles_associations_and_allows_unparsed_draft_text() {
+        let project = tempfile::tempdir().unwrap();
         let mut preferences = WorkspacePreferences {
-            run_profiles: vec![profile()],
+            run_profiles: vec![profile(project.path())],
             project_states: vec![ProjectRunState {
-                project_path: "/project".into(),
-                draft: Some(profile()),
+                project_path: project.path().to_string_lossy().into_owned(),
+                draft: Some(profile(project.path())),
                 last_run: None,
                 selected_profile_id: Some("development".into()),
                 auto_reload: true,
@@ -394,7 +395,7 @@ mod tests {
             ..Default::default()
         };
         validate(&preferences).unwrap();
-        preferences.run_profiles.push(profile());
+        preferences.run_profiles.push(profile(project.path()));
         assert!(validate(&preferences).is_err());
         preferences.run_profiles.pop();
         preferences.project_states[0].selected_profile_id = Some("missing".into());
@@ -404,7 +405,7 @@ mod tests {
             .draft
             .as_mut()
             .unwrap()
-            .project_path = "/other".into();
+            .project_path = project.path().join("other").to_string_lossy().into_owned();
         assert!(validate(&preferences).is_err());
         preferences.project_states[0].draft = None;
         preferences.run_profiles[0]
@@ -420,12 +421,13 @@ mod tests {
     }
     #[test]
     fn incomplete_draft_entrypoint_and_sdk_are_saved_but_named_profiles_are_validated() {
-        let mut draft = profile();
+        let project = tempfile::tempdir().unwrap();
+        let mut draft = profile(project.path());
         draft.entrypoint.clear();
         draft.sdk_path = Some("~/partially entered sdk".into());
         let mut preferences = WorkspacePreferences {
             project_states: vec![ProjectRunState {
-                project_path: "/project".into(),
+                project_path: project.path().to_string_lossy().into_owned(),
                 draft: Some(draft.clone()),
                 last_run: None,
                 selected_profile_id: None,

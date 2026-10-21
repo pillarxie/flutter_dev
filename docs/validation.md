@@ -291,4 +291,8 @@ Rust 按当前会话 URI 订阅 VM Stdout / Stderr，支持 DDS 在订阅确认�
 
 2026年10月21日。新增 Windows x64 专用 Actions 工作流，以当前源码构建 release，由 cargokit 同时编译和打包 Rust 核心。PowerShell 脚本暂存完整发布目录并附带 Visual C++ x64 CRT，Inno Setup 生成当前用户安装器，另提供便携 ZIP 和 SHA256 文件；产物保存30天。流水线使用临时设置文件，检查静默安装、已安装 Rust DLL 的真实 Git FFI 调用、应用启动10秒及卸载。进程存活检查不代表全部界面和 SDK 功能已验证。
 
-本机为 macOS，Flutter analyze 和 git diff --check 通过；Windows release、安装与启动结果以本次远端 Actions 运行记录为准，暂不记为已通过。未执行 Windows 人工交互、业务工程回归或安装器代码签名。
+本机为 macOS，Flutter analyze、两个工作流的 actionlint 和 git diff --check 通过。首次远端执行发现 job env 不支持 runner.temp 上下文，已改用工作区 build 内隔离设置路径，并同步修正原有 desktop 工作流。干净 checkout 的应用分析还扫入 cargokit 的独立 Dart 工具，因其依赖尚未解析产生133项问题；根分析配置现排除随项目交付的 cargokit 目录，不修改工具源码，仍检查应用、自有插件与测试。
+
+修正后的 [Windows 运行](https://github.com/pillarxie/flutter_dev/actions/runs/39567042776) 已通过静态分析、Release 编译、安装器/便携 ZIP 生成和静默安装；安装后的真实 FFI 检查发现 Git 不接受 Rust canonicalize 返回的 Windows verbatim 路径。现在仅对 Git 命令参数转换盘符/UNC 前缀，保留文件访问和 API 返回的 canonical 路径；FFI 测试按目录身份比较，避免两种合法路径表示的字符串差异。
+
+三平台 baseline 还发现 Windows SDK 的 workspaceFolder 展开产生 verbatim 混合分隔符路径，现仅在 Windows 统一分隔符；新增 Unicode 真实目录解析测试。Workspace 两项测试的 Unix 绝对路径样例改用临时目录，不改生产校验合同。本机 Git 11项、SDK 9项、Workspace 5项定向测试通过，Cargo 格式与严格 lib/tests Clippy 通过。Windows 修复后的完整结果以随后远端运行记录为准，暂不记为已通过。未执行 Windows 人工交互、业务工程回归或安装器代码签名。
