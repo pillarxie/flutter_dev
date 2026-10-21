@@ -1,6 +1,6 @@
 # 阶段一兼容基线
 
-日期：2026年10月13日。当前是首个可运行增量，不是全部阶段一完成声明。
+初始日期：2026年10月13日；Windows/Linux CI 与安装包证据更新于2026年10月21日。当前是可运行增量，不是全部阶段一完成声明。
 
 ## 版本与构建
 
@@ -11,8 +11,8 @@
 | 桥接 / 生成器 | 2.12.0 | Rust、Dart 和生成器固定同版；实际 FFI 测试 |
 | 被调试 SDK | Flutter 3.38.3 | 唯一真实 SDK 验证样本；其他版本暂不宣称支持 |
 | macOS | 本机 macOS 26.5.1 arm64 / Xcode 26.0 | release 构建与桌面样例调试；10.15 仅是脚手架部署下限，未验收 |
-| Windows | CI 目标 windows-2022 | 骨架、DLL 打包及进程 Job Object 实现；远端 CI 尚未运行 |
-| Linux | CI 目标 ubuntu-22.04 | 骨架、GTK 构建及 Unix 进程组实现；远端 CI 尚未运行 |
+| Windows | Actions windows-2022 x64 | Rust/Flutter 检查与 release 通过；安装、实际 Rust FFI、启动及卸载通过；未人工交互验收，详见 validation.md |
+| Linux | Actions ubuntu-22.04 | Rust/Flutter 检查与 GTK release 通过；未人工交互验收 |
 | Dart-Code | 暂未选定插件版本 | 当前以 SDK 内置 DAP 文档和协议为实现基线；插件兼容清单尚未完成 |
 
 ## 能力矩阵
@@ -40,4 +40,4 @@ Debug 面板依据模式、noDebug、状态和适配器 capabilities 开放；Pr
 
 三个平台最低宿主版本、额外目标 SDK 矩阵、Dart-Code 版本清单、Windows/Linux WebView、性能预算、额外编辑器兼容矩阵和分发签名仍需原型及真实样例验收。当前不设未经测量的启动或内存预算，也不把应用包磁盘大小作为常驻内存。
 
-macOS 为开发工具调用外部 SDK，release/debug entitlements 未开启 App Sandbox；发行签名、公证与安装验证尚未执行。Windows .bat 参数当前明确拒绝 shell 展开字符，带空格路径通过引号处理，仍需 Windows 真实路径样例验收。
+macOS 为开发工具调用外部 SDK，release/debug entitlements 未开启 App Sandbox；发行签名、公证与安装验证尚未执行。Windows .bat 参数明确拒绝 shell 展开字符，带空格与中文的 canonical 批处理路径、工作目录及独立路径参数已在 CI 真实临时样例验证。cmd.exe 以 UNC 共享为当前目录的限制仍存在，未进行网络共享或真实 SDK 业务项目调试验收；Windows 安装器未签名，内嵌 DevTools 需 WebView2 Runtime。

@@ -298,3 +298,11 @@ Rust 按当前会话 URI 订阅 VM Stdout / Stderr，支持 DDS 在订阅确认�
 三平台 baseline 还发现 Windows SDK 的 workspaceFolder 展开产生 verbatim 混合分隔符路径，现仅在 Windows 统一分隔符；新增 Unicode 真实目录解析测试。Workspace 两项测试的 Unix 绝对路径样例改用临时目录，不改生产校验合同。本机 Git 11项、SDK 9项、Workspace 5项定向测试通过，Cargo 格式与严格 lib/tests Clippy 通过。Windows 修复后的完整结果以随后远端运行记录为准，暂不记为已通过。未执行 Windows 人工交互、业务工程回归或安装器代码签名。
 
 [a28507f 对应安装包运行](https://github.com/pillarxie/flutter_dev/actions/runs/39568377256) 已通过 Release、安装器生成、静默安装、安装后 Git FFI、应用存活10秒及卸载，产物已上传。对应完整 Windows baseline 的76项 Rust 测试通过，但全套 Flutter FFI 仍发现 cmd.exe 无法执行 canonical verbatim Flutter 批处理路径，影响 SDK 探测。随后仅在批处理调用处转换程序/当前目录/独立路径参数，复用 Git 路径转换；普通 exe、shell 字符拦截与 Job 所有权保持原状。测试 fixture 改用 `%~1` 识别已加引号参数，SDK 路径按目录身份比较。本机 Process 11项及 Git 11项测试、all-targets Clippy、格式检查通过；新增两个 Windows 条件测试等待远端执行。安装验证现同时执行完整核心 FFI 与 Git FFI，使用实际安装后的 DLL。
+
+最终安装包源码为 `66185753b079f642ae35051e5234c00886e7d396`，打包分支为 `codex/windows-package-20261021`。[Windows package #6](https://github.com/pillarxie/flutter_dev/actions/runs/39569902511) 全部通过：Windows Release、安装器与便携 ZIP、静默安装、安装后真实核心 FFI 与 Git FFI（2项通过）、进程存活10秒、卸载和产物上传。Artifacts 的 [FlutterDev-windows-x64-6](https://github.com/pillarxie/flutter_dev/actions/runs/39569902511/artifacts/12332032313) 保存至2026年11月20日。
+
+已下载产物至本机忽略目录 `build/windows/downloads/`，核对 GitHub 外层 ZIP 摘要、内部 SHA256SUMS，以及便携版 EXE、Rust/Flutter DLL、Visual C++ CRT 均为 x64 PE，Flutter data/assets 完整。安装器 `FlutterDev-0.1.0+1-windows-x64-setup.exe` 为12,669,057字节，SHA256 `373da832b937eee61c87526ebfdec66ddd2af29617c31debf6859a1cad9798e8`；便携 ZIP 为15,232,122字节，SHA256 `2080ec79181dcda2552009a5d4b1fb44795c863848276f22fa363c81d0bfcc62`。
+
+同源码的 [Desktop baseline](https://github.com/pillarxie/flutter_dev/actions/runs/39569902626) 中，Windows 的 Rust 78项、Flutter 192项通过/4项条件跳过，格式、严格 all-targets Clippy、分析和 Release 全部通过；新增真实 canonical 批处理与 shell 字符拒绝用例、实际 SDK/Git FFI 均通过。Linux 的 Rust 126项、Flutter 193项通过/3项条件跳过及 Release 全部通过。macOS 首次因未改动的 auto_reload 时序测试失败，已仅重跑该 job 一次，撰写时尚未完成，不将整套三平台 CI 记为通过。
+
+Windows 构建有第三方 WebView2 C4458 编译警告，Actions 有 Node 弃用提示，均未阻止成功产物。安装器未签名；未进行 Windows 人工界面/WebView2 交互、网络共享目录或用户业务工程真实 SDK 调试验收。源码快照通过临时 Git 索引提交，当前本地主分支及原有暂存区保持不变，构建产物不入库。
