@@ -11,7 +11,7 @@
 | 桥接 / 生成器 | 2.12.0 | Rust、Dart 和生成器固定同版；实际 FFI 测试 |
 | 被调试 SDK | Flutter 3.38.3 | 唯一真实 SDK 验证样本；其他版本暂不宣称支持 |
 | macOS | 本机 macOS 26.5.1 arm64 / Xcode 26.0 | release 构建与桌面样例调试；10.15 仅是脚手架部署下限，未验收 |
-| Windows | Actions windows-2022 x64 | Rust/Flutter 检查与 release 通过；安装、实际 Rust FFI、启动及卸载通过；未人工交互验收，详见 validation.md |
+| Windows | Actions windows-2022 x64；另测Server2025 | Rust/Flutter 与 release 通过；实际 Rust FFI、普通用户默认安装/目录写入/卸载及临时profile清理通过；无控制台首窗CI约1.60秒、Server约2.45秒，20秒均未观察到终端；未人工交互验收，详见 validation.md |
 | Linux | Actions ubuntu-22.04 | Rust/Flutter 检查与 GTK release 通过；未人工交互验收 |
 | Dart-Code | 暂未选定插件版本 | 当前以 SDK 内置 DAP 文档和协议为实现基线；插件兼容清单尚未完成 |
 

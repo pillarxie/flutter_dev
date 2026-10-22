@@ -324,3 +324,15 @@ Windows WebView2 显式使用 `%LOCALAPPDATA%\flutter_dev\WebView2`，不在安�
 同源码 [Windows package #8](https://github.com/pillarxie/flutter_dev/actions/runs/39744690088) 已完成 Release、安装器和便携 ZIP，安装后真实核心/Git FFI通过。在 Windows2022 的 Session2 中首窗1296ms，20秒终端观察为0，应用正常关闭。新临时普通用户的管理员组成员关系、管理员角色及令牌提升均为false，默认安装、安装/设置目录写入、应用存活10秒和同用户卸载全部通过，任务自然退出0；但控制器最终删除临时 profile 因系统仍持有文件失败，因此该运行整体失败、未上传安装包，仅上传诊断。后续正在修复验证器 profile 生命周期，不能将本次记录记为最终交付成功。
 
 Windows Server2025 的旧包验证同样通过普通用户产品检查，但三次计划任务路径的测试留下的临时 profile 仍被系统持有；第三次已显式释放控制器的 profile 引用，系统仍有额外引用，故停止此路径。对应账号、任务、进程、临时登录权限及 staging 已清理，未强制重启或停止系统服务。精确 SID/目录、只读事件及后续受保护清理脚本位于本机忽略目录 `build/windows/server-standard-user-validation/`。旧包窗口与探针证据仅验证验证器和平台行为，不代表新版缺陷已复现或所有功能已回归。Windows10/11 个人业务工程和 WebView2 人工交互未验收。
+
+最终 [Windows package #9](https://github.com/pillarxie/flutter_dev/actions/runs/39750180161) 全部通过，验证脚本源码为 `ac4b140dad77e93e5b1bf08e5a16ce84685ef778`。该运行按运行源码完整 hash 命中#8安装包缓存，未修改已编译的产品字节；重新执行27项 Flutter定向测试、Rust84项、实际安装后的核心/Git FFI2项、完整窗口和标准用户验证。完全脱离控制台的启动器计数为0，Windows2022 Session2 中首个工作台窗口1599ms，20秒新终端窗口0，应用正常关闭、Job/worker退出0且无清理错误。样例含实际 Flutter3.38.3 SDK 与 Git 项目，未运行个人业务项目。
+
+标准用户验证最终使用交互桌面中的 Credential 子进程，不额外隐式加载 profile：SID匹配，管理员角色/管理员组/TokenIsElevated全部false；真实默认安装、安装与设置目录写入、应用存活10秒和同用户卸载全部通过。worker退出0，所有本轮进程退出后显式卸载 profile，WMI确认已非Loaded并成功删除；环境与控制器权限恢复成功，cleanupErrors为空。计划任务路径的清理失败没有被忽略或降为通过。
+
+成功产物 [FlutterDev-windows-x64-9](https://github.com/pillarxie/flutter_dev/actions/runs/39750180161/artifacts/12413840691) 保存至2026年11月21日，已下载到 `build/windows/downloads/0.1.1+2/`。核验GitHub外层ZIP摘要、内部SHA256SUMS，以及完整Flutter assets、Rust/Flutter/CRT x64二进制；实际安装器和应用manifest均为asInvoker。安装器12,675,955字节，SHA256 `5cd6f8c004e89123b531ccbf374df8485d9b088944f499661a1c5b74e0010399`；便携ZIP15,242,614字节，SHA256 `a7227d2428c4ee4c2c7551ed822d4629b9b7cb80b9744bd5b8d0f1a04feac29c`。安装器仍未代码签名，不能将以上结果当作Windows10/11交互UAC原因已定位。
+
+同一便携ZIP另上传Windows Server2025，远端摘要匹配。使用专用Git样例、隔离设置/缓存以及Session2已登录但RDP断开的Interactive/Limited任务运行最终脚本：启动器控制台进程计数0，首个有客户区的runner窗口2453ms，随后20秒新终端窗口0；应用正常关闭，无强制终止，worker退出0且属于控制器Job，stderr和清理错误均为空。服务器没有安装Flutter SDK，因此此处覆盖工作台及Git项目恢复，不代表真实SDK调试或DevTools交互验收；不以不同缓存/机器上的旧包时间宣称性能提升比例。证据在本机 `build/windows/verification/remote-new/`。
+
+最终源码的 [Desktop baseline #11](https://github.com/pillarxie/flutter_dev/actions/runs/39750180328) 也已完成：Windows Rust84项、Flutter206项通过/4项跳过及Release成功；Linux Rust129项、Flutter207项通过/3项跳过及Release成功；macOS仍为同一既有自动热重载用例失败（129通过、1失败），未重复重跑。格式、严格Clippy、分析及两端实际FFI以对应成功job为准。
+
+服务器最终收尾：新/旧窗口验证任务已注销，两处带本轮marker的ProgramData测试目录已在证据归档并校验后删除，本轮窗口应用/探针进程残留为0。三个计划任务路径留下的临时profile最终复核仍Loaded=true，未强行卸载或修改其目录；对应本地账号与计划任务均不存在。后续受保护清理助手仅在精确SID/目录匹配且三个profile均已由系统正常释放时才允许WMI删除，尚未执行。最终记录位于 `build/windows/server-standard-user-validation/cleanup-status.json` 及 `build/windows/verification/remote-new/cleanup-result.json`。
