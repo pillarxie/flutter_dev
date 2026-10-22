@@ -315,6 +315,12 @@ Windows WebView2 显式使用 `%LOCALAPPDATA%\flutter_dev\WebView2`，不在安�
 
 本机 Rust Process 11项及 Device 5项通过，严格 all-targets Clippy、格式与 `git diff --check` 通过。Flutter 定向32项及完整 Dart analyze 通过。本机 Flutter 已为3.47.7，辅助测试中排除了4项原有 Git 菜单布局用例，它们触发该版本新增的 ListTile 断言；正式构建/回归使用固定 Flutter3.38.3，不改锁文件或升级项目依赖。新增 Flutter/测试 API 另对照官方3.38.3源码核实兼容。
 
-新增 `verify-windows-startup.ps1` 与 `verify-windows-install.ps1`，分别验证无控制台父进程下的真实首窗/终端观察，以及临时标准用户令牌下不传 `/DIR` 的默认安装、目录写入、10秒存活和同用户卸载。前者使用 Job 与启动 gate 限制进程所有权，后者使用 Password/Limited 任务并最终删除测试用户及配置文件。两种验证均输出 JSON，流水线只在验证成功后上传包；同运行源码缓存只复用安装包字节，每次仍重新验证。
+新增 `verify-windows-startup.ps1` 与 `verify-windows-install.ps1`，分别验证完全脱离控制台的父进程下的真实首窗/终端观察，以及临时标准用户令牌下不传 `/DIR` 的默认安装、目录写入、10秒存活和同用户卸载。前者使用 Job 与启动 gate 限制进程所有权；后者最终采用交互桌面中的显式 profile 加载/卸载与 Credential 普通用户进程，禁止 Session0 和管理员令牌代测。两种验证均输出 JSON，流水线只在验证成功后上传包；同运行源码缓存只复用安装包字节，每次仍重新验证。
 
-当前记录为发布前检查，新的 Windows Actions 与最终安装包服务器复测结果待本次运行完成后补充。没有将旧包结果记作新版本通过，也没有进行 Windows10/11 个人业务工程或 WebView2 人工交互验收。
+首轮新增 Windows 探针把 `GetConsoleProcessList=0` 当作无窗口的必要条件，导致2项测试失败。Windows Server2025 独立真实 exe 及 cmd/bat 后代证据显示，`GetConsoleWindow=0`、`IsWindowVisible=false` 时内部计数仍分别为1和2；现保留无窗口句柄/不可见断言，将进程计数仅作诊断，不改生产启动方案，也不放宽进程树所有权验证。
+
+源码 `7ac9a2bda9a8fcefa604f58c610536077393b6e8` 的 [Desktop baseline #10](https://github.com/pillarxie/flutter_dev/actions/runs/39744690108) 中，Windows 的 Rust84项、Flutter206项通过/4项跳过，格式、严格 all-targets Clippy、分析和 Release 全部通过。Linux 的 Rust129项、Flutter207项通过/3项跳过及 Release 全部通过。macOS 首轮及单独重跑一次仍在未修改的 `auto_reload/tests.rs:247` 失败（129通过、1失败），后续 Flutter 检查跳过；不能将整套三平台 CI 记为通过。
+
+同源码 [Windows package #8](https://github.com/pillarxie/flutter_dev/actions/runs/39744690088) 已完成 Release、安装器和便携 ZIP，安装后真实核心/Git FFI通过。在 Windows2022 的 Session2 中首窗1296ms，20秒终端观察为0，应用正常关闭。新临时普通用户的管理员组成员关系、管理员角色及令牌提升均为false，默认安装、安装/设置目录写入、应用存活10秒和同用户卸载全部通过，任务自然退出0；但控制器最终删除临时 profile 因系统仍持有文件失败，因此该运行整体失败、未上传安装包，仅上传诊断。后续正在修复验证器 profile 生命周期，不能将本次记录记为最终交付成功。
+
+Windows Server2025 的旧包验证同样通过普通用户产品检查，但三次计划任务路径的测试留下的临时 profile 仍被系统持有；第三次已显式释放控制器的 profile 引用，系统仍有额外引用，故停止此路径。对应账号、任务、进程、临时登录权限及 staging 已清理，未强制重启或停止系统服务。精确 SID/目录、只读事件及后续受保护清理脚本位于本机忽略目录 `build/windows/server-standard-user-validation/`。旧包窗口与探针证据仅验证验证器和平台行为，不代表新版缺陷已复现或所有功能已回归。Windows10/11 个人业务工程和 WebView2 人工交互未验收。

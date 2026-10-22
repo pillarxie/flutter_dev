@@ -165,6 +165,7 @@ using System.Text;
 public static class FlutterDevWindowCheck {
     [DllImport("kernel32.dll")] private static extern bool FreeConsole();
     [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
+    [DllImport("kernel32.dll")] private static extern uint GetConsoleProcessList(uint[] processes, uint count);
     private delegate bool EnumCallback(IntPtr window, IntPtr parameter);
     private delegate void EventCallback(IntPtr hook, uint kind, IntPtr window, int objectId, int childId, uint thread, uint time);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumCallback callback, IntPtr parameter);
@@ -196,8 +197,10 @@ public static class FlutterDevWindowCheck {
         if (window != IntPtr.Zero && (!checkVisible || IsWindowVisible(window)) && IsConsole(window) && !baseline.Contains(window)) appeared.Add(window);
     }
     public static void Begin() {
-        if (GetConsoleWindow() != IntPtr.Zero) FreeConsole();
-        if (GetConsoleWindow() != IntPtr.Zero) throw new InvalidOperationException("Dedicated launcher still has a console");
+        // A headless console can have no HWND while still being attachable by
+        // Flutter. Always detach, then prove there is no parent console at all.
+        FreeConsole();
+        if (GetConsoleWindow() != IntPtr.Zero || ConsoleProcessCount() != 0) throw new InvalidOperationException("Dedicated launcher still has a console");
         EnumWindows(delegate(IntPtr window, IntPtr ignored) { if (IsConsole(window)) baseline.Add(window); return true; }, IntPtr.Zero);
         // A SHOW event already proves visibility, even if the window has since
         // been hidden before this thread pumps its queued event notification.
@@ -205,6 +208,7 @@ public static class FlutterDevWindowCheck {
         hook = SetWinEventHook(0x8002, 0x8002, IntPtr.Zero, callback, 0, 0, 0);
         if (hook == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Cannot observe window show events");
     }
+    public static uint ConsoleProcessCount() { return GetConsoleProcessList(new uint[1], 1); }
     public static bool Poll(uint process) {
         Message message;
         while (PeekMessage(out message, IntPtr.Zero, 0, 0, 1)) { TranslateMessage(ref message); DispatchMessage(ref message); }
@@ -233,6 +237,7 @@ $result = [ordered]@{
     maxWindowMilliseconds = $MaxWindowMilliseconds
     observeSeconds = $ObserveSeconds
     launcherHasConsole = $false
+    launcherConsoleProcessCount = $null
     newVisibleConsoleWindows = @()
     projectPath = $ProjectPath
     sdkPath = $SdkPath
@@ -244,6 +249,7 @@ try {
     $env:LOCALAPPDATA = Join-Path $OutputDirectory 'local-app-data'
     New-Item -ItemType Directory -Path $env:LOCALAPPDATA -Force | Out-Null
     [FlutterDevWindowCheck]::Begin()
+    $result.launcherConsoleProcessCount = [FlutterDevWindowCheck]::ConsoleProcessCount()
     $timer = [Diagnostics.Stopwatch]::StartNew()
     # Direct creation keeps the GUI within the worker's inherited Job; do not
     # delegate launch through a shell broker that could escape test ownership.

@@ -1,4 +1,4 @@
-# The controller needs elevation only to provision and clean its disposable user/task.
+# The controller needs elevation only to provision and clean its disposable user.
 # Installation, filesystem probes, application startup and uninstall run as that
 # standard user. Never retry those checks with the controller's administrator token.
 [CmdletBinding()]
@@ -158,6 +158,10 @@ $controllerPrincipal = [Security.Principal.WindowsPrincipal]::new($controllerIde
 if (-not $controllerPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Controller requires elevation to create and remove its temporary standard user.'
 }
+$controllerProcess = Get-Process -Id $PID
+if ($controllerProcess.SessionId -eq 0) {
+    throw 'Session 0 cannot run this desktop standard-user check. Run from an elevated administrator desktop in a nonzero session; no test account was created.'
+}
 if (-not $InstallerPath) { throw '-InstallerPath is required.' }
 $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 if (-not $OutputDirectory) {
@@ -172,15 +176,20 @@ foreach ($oldLog in @('result.json', 'worker-result.json', 'worker.log', 'worker
 $runId = [guid]::NewGuid().ToString('N')
 $userName = 'fdcheck' + $runId.Substring(0, 10)
 $qualifiedUser = "$env:COMPUTERNAME\$userName"
-$taskName = 'FlutterDev-install-check-' + $runId
 if (-not $SharedRootDirectory) { $SharedRootDirectory = $env:ProgramData }
 $SharedRootDirectory = (Resolve-Path -LiteralPath $SharedRootDirectory).Path
 $SharedDirectory = Join-Path $SharedRootDirectory ('FlutterDev-install-check-' + $runId)
 $user = $null
-$taskRegistered = $false
+$workerProcess = $null
+$workerProcessHandle = [IntPtr]::Zero
+$ownedProcessesExited = $false
 $batchLogonRightAdded = $false
 $sharedCreated = $false
-$result = [ordered]@{ success = $false; runId = $runId; startedAtUtc = [DateTime]::UtcNow.ToString('o'); transport = $null; userName = $qualifiedUser; worker = $null; error = $null; cleanupErrors = @() }
+$profilePrivileges = $null
+$profileLease = $null
+$securePassword = $null
+$passwordBytes = $null
+$result = [ordered]@{ success = $false; runId = $runId; startedAtUtc = [DateTime]::UtcNow.ToString('o'); controllerSessionId = $controllerProcess.SessionId; transport = $null; userName = $qualifiedUser; worker = $null; error = $null; cleanupErrors = @() }
 try {
     # Passwords are generated in memory and never written to arguments, logs or JSON.
     $passwordBytes = New-Object byte[] 32
@@ -214,8 +223,8 @@ try {
     }
     $workerArguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$(Join-Path $SharedDirectory 'verify.ps1')`" -Worker -SharedDirectory `"$SharedDirectory`""
     $workerResult = Join-Path $SharedDirectory 'worker-result.json'
-    # Use the same Password/Limited task path on CI and real machines. Grant only
-    # this disposable account the batch logon right, and revoke it in finally.
+    # Only this disposable account gets the batch logon right for the explicit
+    # profile lease. The desktop worker uses Credential without LoadUserProfile.
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -255,25 +264,149 @@ public static class InstallCheckBatchLogon {
         } finally { Marshal.FreeHGlobal(right.Buffer); LsaClose(policy); }
     }
 }
+
+// Keep the controller's privilege changes scoped, including constructor failures.
+public sealed class InstallCheckProfilePrivileges : IDisposable {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Luid { public uint Low; public int High; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Privileges { public uint Count; public Luid Id; public uint Flags; }
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LookupPrivilegeValue(string system, string name, out Luid id);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool AdjustTokenPrivileges(IntPtr token, bool disable, ref Privileges value,
+        int length, out Privileges previous, out int returned);
+    private IntPtr token;
+    private readonly Privileges[] previous = new Privileges[2];
+    private int changed;
+    public InstallCheckProfilePrivileges() {
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        try {
+            foreach (var name in new[] { "SeBackupPrivilege", "SeRestorePrivilege" }) {
+                var value = new Privileges { Count = 1, Flags = 2 };
+                if (!LookupPrivilegeValue(null, name, out value.Id))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                int length;
+                if (!AdjustTokenPrivileges(token, false, ref value, Marshal.SizeOf(typeof(Privileges)), out previous[changed], out length))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                var error = Marshal.GetLastWin32Error();
+                if (error != 0) throw new Win32Exception(error);
+                changed++;
+            }
+        } catch { Dispose(); throw; }
+    }
+    public void Dispose() {
+        if (token == IntPtr.Zero) return;
+        Exception failure = null;
+        try {
+            for (var index = changed - 1; index >= 0; index--) {
+                Privileges ignored; int length;
+                if (!AdjustTokenPrivileges(token, false, ref previous[index], Marshal.SizeOf(typeof(Privileges)), out ignored, out length))
+                    failure = new Win32Exception(Marshal.GetLastWin32Error());
+                else if (Marshal.GetLastWin32Error() != 0)
+                    failure = new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        } finally { CloseHandle(token); token = IntPtr.Zero; }
+        if (failure != null) throw failure;
+    }
+}
+
+// The lease owns exactly the token and hProfile returned for this test user.
+// UnloadUserProfile closes hProfile; never close/force-unload registry hives.
+public sealed class InstallCheckProfileLease : IDisposable {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProfileInfo {
+        public int Size, Flags;
+        public string UserName, ProfilePath, DefaultPath, ServerName, PolicyPath;
+        public IntPtr Profile;
+    }
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LogonUser(string user, string domain, string password, int type, int provider, out IntPtr token);
+    [DllImport("userenv.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool LoadUserProfile(IntPtr token, ref ProfileInfo profile);
+    [DllImport("userenv.dll", SetLastError = true)]
+    private static extern bool UnloadUserProfile(IntPtr token, IntPtr profile);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    private IntPtr token, profile;
+    public static InstallCheckProfileLease Load(string user, string domain, string password) {
+        var lease = new InstallCheckProfileLease();
+        if (!LogonUser(user, domain, password, 4, 0, out lease.token))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        var info = new ProfileInfo { Size = Marshal.SizeOf(typeof(ProfileInfo)), Flags = 1, UserName = user };
+        if (!LoadUserProfile(lease.token, ref info)) {
+            var error = Marshal.GetLastWin32Error();
+            CloseHandle(lease.token); lease.token = IntPtr.Zero;
+            throw new Win32Exception(error);
+        }
+        lease.profile = info.Profile;
+        return lease;
+    }
+    public static int ProcessExitCode(IntPtr process) {
+        uint code;
+        if (!GetExitCodeProcess(process, out code)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return unchecked((int)code);
+    }
+    public void Dispose() {
+        try {
+            if (profile != IntPtr.Zero) {
+                if (!UnloadUserProfile(token, profile))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                profile = IntPtr.Zero;
+            }
+        } finally {
+            if (token != IntPtr.Zero) { CloseHandle(token); token = IntPtr.Zero; }
+        }
+    }
+}
 '@
     [InstallCheckBatchLogon]::Set($user.SID.Value, $true)
     $batchLogonRightAdded = $true
     $result.batchLogonRightGrantedToTemporaryUser = $true
-    $principal = New-ScheduledTaskPrincipal -UserId $qualifiedUser -LogonType Password -RunLevel Limited
-    $action = New-ScheduledTaskAction -Execute $powershellExe -Argument $workerArguments -WorkingDirectory $SharedDirectory
-    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSeconds) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-    $task = New-ScheduledTask -Action $action -Principal $principal -Settings $settings
-    Register-ScheduledTask -TaskName $taskName -InputObject $task -User $qualifiedUser -Password $plainPassword | Out-Null
-    $taskRegistered = $true
-    Start-ScheduledTask -TaskName $taskName
-    $result.transport = 'ScheduledTask-Password-Limited'
+    $profilePrivileges = [InstallCheckProfilePrivileges]::new()
+    $profileLease = [InstallCheckProfileLease]::Load($userName, $env:COMPUTERNAME, $plainPassword)
+    $result.explicitProfileLeaseLoaded = $true
+    $loadedProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'"
+    if (-not $loadedProfile) { throw 'Explicit profile lease did not create the expected user profile.' }
+    $workerEnvironment = @{
+        USERPROFILE = $loadedProfile.LocalPath
+        LOCALAPPDATA = Join-Path $loadedProfile.LocalPath 'AppData/Local'
+        APPDATA = Join-Path $loadedProfile.LocalPath 'AppData/Roaming'
+        TEMP = Join-Path $loadedProfile.LocalPath 'AppData/Local/Temp'
+        TMP = Join-Path $loadedProfile.LocalPath 'AppData/Local/Temp'
+    }
+    New-Item -ItemType Directory -Path $workerEnvironment.TEMP -Force | Out-Null
+    $previousEnvironment = @{}
+    foreach ($name in $workerEnvironment.Keys) { $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+    try {
+        foreach ($name in $workerEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $workerEnvironment[$name], 'Process') }
+        $credential = [PSCredential]::new($qualifiedUser, $securePassword)
+        # Do not pass -LoadUserProfile: the controller owns the only profile lease.
+        $workerProcess = Start-Process -FilePath $powershellExe -ArgumentList $workerArguments -Credential $credential -WorkingDirectory $SharedDirectory -RedirectStandardOutput (Join-Path $SharedDirectory 'worker-stdout.log') -RedirectStandardError (Join-Path $SharedDirectory 'worker-stderr.log') -PassThru
+        $workerProcessHandle = $workerProcess.Handle
+    } finally {
+        foreach ($name in $previousEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process') }
+        $result.controllerEnvironmentRestored = $true
+        $credential = $null
+    }
+    $result.transport = 'Start-Process-Credential-ExplicitProfile'
     $plainPassword = $null
     [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while (-not (Test-Path -LiteralPath $workerResult)) {
-        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName
-        if ($taskInfo.LastRunTime.Year -gt 2000 -and $taskInfo.LastTaskResult -notin @(0, 267009)) {
-            throw "Standard-user task failed before producing a result: $($taskInfo.LastTaskResult)"
+        $exitCode = [InstallCheckProfileLease]::ProcessExitCode($workerProcessHandle)
+        if ($exitCode -ne 259) {
+            if (Test-Path -LiteralPath $workerResult) { break }
+            throw "Standard-user worker exited before producing a result: $exitCode"
         }
         if ([DateTime]::UtcNow -ge $deadline) { throw 'Standard-user verification timed out; no administrator fallback is permitted.' }
         Start-Sleep -Milliseconds 500
@@ -283,33 +416,13 @@ public static class InstallCheckBatchLogon {
     if ($result.worker.identity.sid -ne $user.SID.Value -or $result.worker.identity.administratorRole -or $result.worker.identity.administratorSidPresent -or $result.worker.identity.tokenIsElevated) {
         throw 'Worker result did not prove the expected standard-user token.'
     }
-    # Reporting finishes just before the worker exits. Let Task Scheduler finish
-    # the logon/profile lifecycle rather than killing the worker at that point.
-    $exitDeadline = [DateTime]::UtcNow.AddSeconds(15)
-    while ((Get-ScheduledTask -TaskName $taskName).State -in @('Running', 'Queued')) {
-        if ([DateTime]::UtcNow -ge $exitDeadline) { throw 'Worker task did not exit after reporting.' }
-        Start-Sleep -Milliseconds 200
-    }
-    $result.scheduledTaskExitCode = (Get-ScheduledTaskInfo -TaskName $taskName).LastTaskResult
-    if ($result.scheduledTaskExitCode -ne 0) { throw "Worker task exit code: $($result.scheduledTaskExitCode)" }
+    if (-not $workerProcess.WaitForExit(15000)) { throw 'Standard-user worker did not exit after reporting.' }
+    $result.workerExitCode = [InstallCheckProfileLease]::ProcessExitCode($workerProcessHandle)
+    if ($result.workerExitCode -ne 0) { throw "Standard-user worker exit code: $($result.workerExitCode)" }
     $result.success = $true
 } catch {
     $result.error = $_.Exception.Message
 } finally {
-    if ($taskRegistered) {
-        try {
-            $stopDeadline = [DateTime]::UtcNow.AddSeconds(10)
-            while ((Get-ScheduledTask -TaskName $taskName).State -in @('Running', 'Queued') -and
-                (Test-Path -LiteralPath (Join-Path $SharedDirectory 'worker-result.json')) -and
-                [DateTime]::UtcNow -lt $stopDeadline) {
-                Start-Sleep -Milliseconds 200
-            }
-            if ((Get-ScheduledTask -TaskName $taskName).State -in @('Running', 'Queued')) {
-                Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-            }
-            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-        } catch { $result.cleanupErrors += "Scheduled task: $($_.Exception.Message)" }
-    }
     # This random user is owned exclusively by this run. No other users' processes,
     # directories, settings, projects or applications are inspected or terminated.
     if ($user) {
@@ -318,11 +431,30 @@ public static class InstallCheckBatchLogon {
             catch { $result.cleanupErrors += "Temporary batch logon right: $($_.Exception.Message)" }
         }
         try {
-            Get-Process -IncludeUserName -ErrorAction SilentlyContinue |
-                Where-Object { $_.UserName -eq $qualifiedUser } |
-                Stop-Process -Force -ErrorAction Stop
+            if ($null -ne $workerProcess -and (Test-Path -LiteralPath (Join-Path $SharedDirectory 'worker-result.json'))) {
+                $workerProcess.WaitForExit(10000) | Out-Null
+            }
+            $ownedProcesses = @(Get-Process -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName -eq $qualifiedUser })
+            foreach ($owned in $ownedProcesses) {
+                try {
+                    if (-not $owned.HasExited) { $owned.Kill() }
+                    if (-not $owned.WaitForExit(5000)) { throw "Owned process did not exit: $($owned.Id)" }
+                } catch {
+                    if (Get-Process -Id $owned.Id -ErrorAction SilentlyContinue) { throw }
+                } finally { $owned.Dispose() }
+            }
+            if ($null -ne $workerProcess) {
+                if (-not $workerProcess.WaitForExit(5000)) { throw 'Worker process is still running before profile unload.' }
+                if ($workerProcessHandle -ne [IntPtr]::Zero) { $result.workerExitCode = [InstallCheckProfileLease]::ProcessExitCode($workerProcessHandle) }
+            }
+            if (@(Get-Process -IncludeUserName -ErrorAction SilentlyContinue | Where-Object { $_.UserName -eq $qualifiedUser }).Count -ne 0) {
+                throw 'Owned user still has a running process before profile unload.'
+            }
+            $ownedProcessesExited = $true
+            $result.ownedProcessesExitedBeforeProfileUnload = $true
         } catch { $result.cleanupErrors += "Owned processes: $($_.Exception.Message)" }
     }
+    if ($null -ne $workerProcess) { $workerProcess.Dispose() }
     if ($sharedCreated) {
         try {
             foreach ($logFile in @('worker-result.json', 'worker.log', 'worker-stdout.log', 'worker-stderr.log', 'install.log', 'uninstall.log')) {
@@ -331,6 +463,16 @@ public static class InstallCheckBatchLogon {
             }
             Remove-Item -LiteralPath $SharedDirectory -Recurse -Force
         } catch { $result.cleanupErrors += "Shared directory: $($_.Exception.Message)" }
+    }
+    if ($null -ne $profileLease) {
+        if ($ownedProcessesExited) {
+            try {
+                $profileLease.Dispose()
+                $result.explicitProfileLeaseUnloaded = $true
+            } catch { $result.cleanupErrors += "Owned profile lease: $($_.Exception.Message)" }
+        } else {
+            $result.cleanupErrors += 'Owned profile lease was not unloaded because process exit could not be confirmed.'
+        }
     }
     if ($user) {
         try {
@@ -347,7 +489,15 @@ public static class InstallCheckBatchLogon {
         } catch { $result.cleanupErrors += "Owned profile: $($_.Exception.Message)" }
         try { Remove-LocalUser -SID $user.SID } catch { $result.cleanupErrors += "Owned local user: $($_.Exception.Message)" }
     }
+    if ($null -ne $profilePrivileges) {
+        try {
+            $profilePrivileges.Dispose()
+            $result.controllerPrivilegesRestored = $true
+        } catch { $result.cleanupErrors += "Controller privileges: $($_.Exception.Message)" }
+    }
     $plainPassword = $null
+    if ($null -ne $securePassword) { $securePassword.Dispose() }
+    if ($null -ne $passwordBytes) { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
     if ($result.cleanupErrors.Count -gt 0) { $result.success = $false }
     $result.finishedAtUtc = [DateTime]::UtcNow.ToString('o')
     $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'result.json') -Encoding utf8

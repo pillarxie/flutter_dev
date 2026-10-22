@@ -101,10 +101,10 @@ FLUTTER_DEV_SETTINGS_PATH=/path/to/disposable/settings.json cargo run --manifest
 
 脚本使用独立设置及用户缓存目录，在没有控制台窗口的专用启动进程中测量首个可见且具有客户区的 Flutter 工作台窗口，默认上限10秒；随后观察20秒内新出现的终端窗口。结果记录 Windows Session ID，Session 0 不能当作交互桌面验收。Job Object 只清理此次验证拥有的进程树；应用存活或窗口显示不代表工作台、SDK 和 WebView2 所有功能已经通过验收。窗口观察可能漏掉极短的闪窗，因此同时执行 Rust 的 Windows 真实子进程测试：直接 exe、cmd/bat 后代均以 Win32 API 验证没有控制台窗口，并验证终止后代时保留其他 Job。内部控制台进程计数单独记录，计数非零不等同于存在窗口。
 
-普通用户权限验证需在管理员 PowerShell 中执行控制器，以创建和最终删除一个临时本地普通用户；安装、目录写入、应用启动和卸载均在该用户的非管理员令牌下运行，不使用管理员令牌代测：
+普通用户权限验证需在交互桌面的管理员 PowerShell 中执行控制器，以创建和最终删除一个临时本地普通用户；Session 0 在创建账号前直接拒绝。安装、目录写入、应用启动和卸载均在该用户的非管理员令牌下运行，不使用管理员令牌代测：
 
 ```powershell
 ./scripts/verify-windows-install.ps1 -InstallerPath build/windows/installer/FlutterDev-0.1.1+2-windows-x64-setup.exe -OutputDirectory build/windows/verification/standard-user
 ```
 
-脚本不传 `/DIR`，验证真实的当前用户默认安装位置，记录用户 SID、管理员组成员关系和令牌提升状态，并在结束后清理本轮账号、任务、进程与配置文件。凭据只在内存中生成，不写入仓库、命令行或报告。流水线只在这些检查通过后上传安装包；相同运行源码的安装包可以复用缓存，但每次仍重新验证。
+脚本不传 `/DIR`，验证真实的当前用户默认安装位置，记录用户 SID、管理员组成员关系和令牌提升状态。控制器显式加载本轮用户的 profile，通过 `Start-Process -Credential` 启动标准用户进程；不再额外隐式加载 profile。退出后确认本轮进程结束，显式卸载并删除 profile、删除账号、恢复控制器的环境及权限；任何清理失败仍记为失败。凭据只在内存中生成，不写入仓库、命令行或报告。流水线只在这些检查通过后上传安装包；相同运行源码的安装包可以复用缓存，但每次仍重新验证。
