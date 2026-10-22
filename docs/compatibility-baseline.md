@@ -1,6 +1,6 @@
 # 阶段一兼容基线
 
-初始日期：2026年10月13日；Windows/Linux CI 与安装包证据更新于2026年10月21日。当前是可运行增量，不是全部阶段一完成声明。
+初始日期：2026年10月13日；Windows 启动与用户目录实现更新于2026年10月22日，验收证据见 validation.md。当前是可运行增量，不是全部阶段一完成声明。
 
 ## 版本与构建
 
@@ -40,4 +40,4 @@ Debug 面板依据模式、noDebug、状态和适配器 capabilities 开放；Pr
 
 三个平台最低宿主版本、额外目标 SDK 矩阵、Dart-Code 版本清单、Windows/Linux WebView、性能预算、额外编辑器兼容矩阵和分发签名仍需原型及真实样例验收。当前不设未经测量的启动或内存预算，也不把应用包磁盘大小作为常驻内存。
 
-macOS 为开发工具调用外部 SDK，release/debug entitlements 未开启 App Sandbox；发行签名、公证与安装验证尚未执行。Windows .bat 参数明确拒绝 shell 展开字符，带空格与中文的 canonical 批处理路径、工作目录及独立路径参数已在 CI 真实临时样例验证。cmd.exe 以 UNC 共享为当前目录的限制仍存在，未进行网络共享或真实 SDK 业务项目调试验收；Windows 安装器未签名，内嵌 DevTools 需 WebView2 Runtime。
+macOS 为开发工具调用外部 SDK，release/debug entitlements 未开启 App Sandbox；发行签名、公证与安装验证尚未执行。Windows .bat 参数明确拒绝 shell 展开字符，带空格与中文的 canonical 批处理路径、工作目录及独立路径参数已在 CI 真实临时样例验证。后台受控子进程禁用控制台窗口，WebView2 数据显式存储在当前用户 LOCALAPPDATA；首帧加载界面先于 Rust 初始化。cmd.exe 以 UNC 共享为当前目录的限制仍存在，未进行网络共享或真实 SDK 业务项目调试验收；Windows 安装器未签名，内嵌 DevTools 需 WebView2 Runtime。

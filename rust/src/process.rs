@@ -507,11 +507,16 @@ mod windows_tests {
         fn WaitForSingleObject(handle: isize, milliseconds: u32) -> u32;
         fn CloseHandle(handle: isize) -> i32;
     }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn IsWindowVisible(window: isize) -> i32;
+    }
 
     #[derive(serde::Deserialize)]
     struct ConsoleReport {
         pid: u32,
         console_window: isize,
+        console_visible: bool,
         console_processes: u32,
     }
 
@@ -526,24 +531,27 @@ mod windows_tests {
         let console_window = unsafe { GetConsoleWindow() };
         let console_processes =
             unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
-        assert_eq!(
-            console_window, 0,
-            "background child acquired a console window"
-        );
-        assert_eq!(
-            console_processes, 0,
-            "background child is attached to a console"
-        );
+        let console_visible =
+            console_window != 0 && unsafe { IsWindowVisible(console_window) } != 0;
         fs::write(
             report,
             serde_json::json!({
                 "pid": std::process::id(),
                 "console_window": console_window,
+                "console_visible": console_visible,
                 "console_processes": console_processes,
             })
             .to_string(),
         )
         .unwrap();
+        // Windows can retain a headless console with one or more processes even
+        // under CREATE_NO_WINDOW. Its process count does not imply a window.
+        assert_eq!(
+            console_window, 0,
+            "visible={console_visible}, processes={console_processes}"
+        );
+        assert!(!console_visible, "processes={console_processes}");
+        println!("console window={console_window}, visible={console_visible}, processes={console_processes}");
         println!("console-probe-ok");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
         if std::env::var_os(CONSOLE_STAY_ALIVE).is_some() {
@@ -609,11 +617,17 @@ mod windows_tests {
             let primary_pid = process.id();
             process.stdin.take();
             let mut stdout = process.stdout.take().unwrap();
-            let (output, status) = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut stderr = process.stderr.take().unwrap();
+            let (output, errors, status) = tokio::time::timeout(Duration::from_secs(20), async {
                 tokio::try_join!(
                     async {
                         let mut output = String::new();
                         stdout.read_to_string(&mut output).await?;
+                        Ok::<_, std::io::Error>(output)
+                    },
+                    async {
+                        let mut output = String::new();
+                        stderr.read_to_string(&mut output).await?;
                         Ok::<_, std::io::Error>(output)
                     },
                     async { process.wait().await.map_err(std::io::Error::other) },
@@ -622,11 +636,24 @@ mod windows_tests {
             .await
             .unwrap()
             .unwrap();
-            assert_eq!(status.code(), Some(7));
+            assert_eq!(
+                status.code(),
+                Some(7),
+                "{}: stdout={output}; stderr={errors}",
+                program.display()
+            );
             assert!(output.contains("console-probe-ok"), "{output}");
             let report = console_report(&report_path).await;
-            assert_eq!(report.console_window, 0);
-            assert_eq!(report.console_processes, 0);
+            assert_eq!(
+                report.console_window, 0,
+                "processes={}",
+                report.console_processes
+            );
+            assert!(
+                !report.console_visible,
+                "processes={}",
+                report.console_processes
+            );
             if index == 1 {
                 assert_ne!(
                     Some(report.pid),
@@ -666,6 +693,12 @@ mod windows_tests {
         )
         .unwrap();
         let descendant = console_report(&report_path).await;
+        assert_eq!(
+            descendant.console_window, 0,
+            "processes={}",
+            descendant.console_processes
+        );
+        assert!(!descendant.console_visible);
         assert_ne!(Some(descendant.pid), owned.id());
         let handle = ProcessHandle(unsafe {
             OpenProcess(0x00100000 | 0x1000, 0, descendant.pid) // SYNCHRONIZE | QUERY_LIMITED_INFORMATION

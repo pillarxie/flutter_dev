@@ -99,7 +99,7 @@ FLUTTER_DEV_SETTINGS_PATH=/path/to/disposable/settings.json cargo run --manifest
 ./scripts/verify-windows-startup.ps1 -ExecutablePath build/windows/x64/runner/Release/flutter_dev.exe -OutputDirectory build/windows/verification/desktop -ProjectPath C:/disposable/sample -SdkPath C:/flutter
 ```
 
-脚本使用独立设置及用户缓存目录，在没有控制台的专用启动进程中测量首个可见且具有客户区的 Flutter 工作台窗口，默认上限10秒；随后观察20秒内新出现的终端窗口。结果记录 Windows Session ID，Session 0 不能当作交互桌面验收。Job Object 只清理此次验证拥有的进程树；应用存活或窗口显示不代表工作台、SDK 和 WebView2 所有功能已经通过验收。窗口观察可能漏掉极短的闪窗，因此同时执行 Rust 的 Windows 真实子进程测试：直接 exe、cmd/bat 后代均以 Win32 API 验证未附着控制台，并验证终止后代时保留其他 Job。
+脚本使用独立设置及用户缓存目录，在没有控制台窗口的专用启动进程中测量首个可见且具有客户区的 Flutter 工作台窗口，默认上限10秒；随后观察20秒内新出现的终端窗口。结果记录 Windows Session ID，Session 0 不能当作交互桌面验收。Job Object 只清理此次验证拥有的进程树；应用存活或窗口显示不代表工作台、SDK 和 WebView2 所有功能已经通过验收。窗口观察可能漏掉极短的闪窗，因此同时执行 Rust 的 Windows 真实子进程测试：直接 exe、cmd/bat 后代均以 Win32 API 验证没有控制台窗口，并验证终止后代时保留其他 Job。内部控制台进程计数单独记录，计数非零不等同于存在窗口。
 
 普通用户权限验证需在管理员 PowerShell 中执行控制器，以创建和最终删除一个临时本地普通用户；安装、目录写入、应用启动和卸载均在该用户的非管理员令牌下运行，不使用管理员令牌代测：
 

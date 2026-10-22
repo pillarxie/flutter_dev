@@ -1,4 +1,4 @@
-# The controller needs elevation only to create/remove its disposable local user.
+# The controller needs elevation only to provision and clean its disposable user/task.
 # Installation, filesystem probes, application startup and uninstall run as that
 # standard user. Never retry those checks with the controller's administrator token.
 [CmdletBinding()]
@@ -298,6 +298,12 @@ public static class InstallCheckBatchLogon {
 } finally {
     if ($taskRegistered) {
         try {
+            $stopDeadline = [DateTime]::UtcNow.AddSeconds(10)
+            while ((Get-ScheduledTask -TaskName $taskName).State -in @('Running', 'Queued') -and
+                (Test-Path -LiteralPath (Join-Path $SharedDirectory 'worker-result.json')) -and
+                [DateTime]::UtcNow -lt $stopDeadline) {
+                Start-Sleep -Milliseconds 200
+            }
             if ((Get-ScheduledTask -TaskName $taskName).State -in @('Running', 'Queued')) {
                 Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
             }
@@ -333,7 +339,11 @@ public static class InstallCheckBatchLogon {
                 Start-Sleep -Seconds 1
                 $profile = Get-CimInstance Win32_UserProfile -Filter "SID='$($user.SID.Value)'"
             }
-            if ($profile) { $profile | Remove-CimInstance }
+            if ($profile) {
+                $result.profileCleanup = [ordered]@{ sid = $profile.SID; path = $profile.LocalPath; loadedBeforeRemoval = $profile.Loaded; removed = $false }
+                $profile | Remove-CimInstance
+                $result.profileCleanup.removed = $true
+            }
         } catch { $result.cleanupErrors += "Owned profile: $($_.Exception.Message)" }
         try { Remove-LocalUser -SID $user.SID } catch { $result.cleanupErrors += "Owned local user: $($_.Exception.Message)" }
     }
