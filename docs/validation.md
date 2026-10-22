@@ -306,3 +306,15 @@ Rust 按当前会话 URI 订阅 VM Stdout / Stderr，支持 DDS 在订阅确认�
 同源码的 [Desktop baseline](https://github.com/pillarxie/flutter_dev/actions/runs/39569902626) 中，Windows 的 Rust 78项、Flutter 192项通过/4项条件跳过，格式、严格 all-targets Clippy、分析和 Release 全部通过；新增真实 canonical 批处理与 shell 字符拒绝用例、实际 SDK/Git FFI 均通过。Linux 的 Rust 126项、Flutter 193项通过/3项条件跳过及 Release 全部通过。macOS 首次因未改动的 auto_reload 时序测试失败，已仅重跑该 job 一次，撰写时尚未完成，不将整套三平台 CI 记为通过。
 
 Windows 构建有第三方 WebView2 C4458 编译警告，Actions 有 Node 弃用提示，均未阻止成功产物。安装器未签名；未进行 Windows 人工界面/WebView2 交互、网络共享目录或用户业务工程真实 SDK 调试验收。源码快照通过临时 Git 索引提交，当前本地主分支及原有暂存区保持不变，构建产物不入库。
+
+## Windows 首窗、后台进程及用户目录修复
+
+2026年10月22日。版本更新为 `0.1.1+2`。Flutter 首个加载帧提交后才初始化原生核心，失败可重试，卸载后的迟到结果被忽略。Rust 的受控后台进程增加 `CREATE_NO_WINDOW`，保留创建挂起、Job 分配后恢复及独立编辑器路径；新增真实 exe、cmd/bat 后代的控制台 API 检查及进程树隔离测试。存活 SDK daemon 的设备/模拟器请求复用已有探测结果，并发首次请求合并创建，死 daemon 重探测；其他 SDK 的慢探测不阻塞存活 daemon 查询。添加项目后的排队 Git 刷新复用已在进行的请求。
+
+Windows WebView2 显式使用 `%LOCALAPPDATA%\flutter_dev\WebView2`，不在安装目录创建缓存；创建迟到及离页均释放环境，兼容锁定插件0.6.0的 dispose channel 问题。安装器继续使用 `PrivilegesRequired=lowest` 与当前用户默认目录。旧安装器与主程序的实际 manifest 均为 `asInvoker`；用户报告的交互 UAC 原因尚未复现，不能把静默安装或 manifest 检查等同于已定位该弹窗原因。
+
+本机 Rust Process 11项及 Device 5项通过，严格 all-targets Clippy、格式与 `git diff --check` 通过。Flutter 定向32项及完整 Dart analyze 通过。本机 Flutter 已为3.47.7，辅助测试中排除了4项原有 Git 菜单布局用例，它们触发该版本新增的 ListTile 断言；正式构建/回归使用固定 Flutter3.38.3，不改锁文件或升级项目依赖。新增 Flutter/测试 API 另对照官方3.38.3源码核实兼容。
+
+新增 `verify-windows-startup.ps1` 与 `verify-windows-install.ps1`，分别验证无控制台父进程下的真实首窗/终端观察，以及临时标准用户令牌下不传 `/DIR` 的默认安装、目录写入、10秒存活和同用户卸载。前者使用 Job 与启动 gate 限制进程所有权，后者使用 Password/Limited 任务并最终删除测试用户及配置文件。两种验证均输出 JSON，流水线只在验证成功后上传包；同运行源码缓存只复用安装包字节，每次仍重新验证。
+
+当前记录为发布前检查，新的 Windows Actions 与最终安装包服务器复测结果待本次运行完成后补充。没有将旧包结果记作新版本通过，也没有进行 Windows10/11 个人业务工程或 WebView2 人工交互验收。

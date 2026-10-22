@@ -112,6 +112,8 @@ flutter build windows --release
 
 产物输出到 `build/windows/installer/`。便携版需解压完整目录后运行，不能只复制 `flutter_dev.exe`。
 
+Windows 启动先显示加载界面，再初始化 Rust 核心；后台 SDK、Git 和批处理子进程禁用控制台窗口。WebView2 缓存位于当前用户的 `%LOCALAPPDATA%\flutter_dev\WebView2`，不在安装目录创建缓存。安装器使用普通用户权限，默认目录为 `%LOCALAPPDATA%\Programs\Flutter Dev`。打包流水线另检查首个工作台窗口显示耗时、后台终端窗口，以及临时普通用户的默认安装、目录写入、启动和卸载；复现命令见[开发说明](docs/development.md#windows-安装与启动验证)。
+
 ## 开发路线
 
 接下来重点完善：

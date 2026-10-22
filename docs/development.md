@@ -90,3 +90,21 @@ FLUTTER_DEV_SETTINGS_PATH=/path/to/disposable/settings.json cargo run --manifest
 ```
 
 两次自动保存检查均输出从保存到 reassemble 标记的耗时，并限制在 6 秒以内；初始化监控和手动操作仍允许 40 秒。正常轮询校验间隔为 8 秒，依赖保存后另等待 10 秒检查是否重复重载。受限执行沙箱可能静默屏蔽 macOS FSEvents，验证原生监听需在允许宿主文件事件的环境执行；仅在 8 秒或更久后观察到重载，只能证明轮询兜底工作，不能作为原生监听通过的证据。
+
+## Windows 安装与启动验证
+
+在 Windows 的目标桌面会话中执行，使用完整的 release 目录和可丢弃项目：
+
+```powershell
+./scripts/verify-windows-startup.ps1 -ExecutablePath build/windows/x64/runner/Release/flutter_dev.exe -OutputDirectory build/windows/verification/desktop -ProjectPath C:/disposable/sample -SdkPath C:/flutter
+```
+
+脚本使用独立设置及用户缓存目录，在没有控制台的专用启动进程中测量首个可见且具有客户区的 Flutter 工作台窗口，默认上限10秒；随后观察20秒内新出现的终端窗口。结果记录 Windows Session ID，Session 0 不能当作交互桌面验收。Job Object 只清理此次验证拥有的进程树；应用存活或窗口显示不代表工作台、SDK 和 WebView2 所有功能已经通过验收。窗口观察可能漏掉极短的闪窗，因此同时执行 Rust 的 Windows 真实子进程测试：直接 exe、cmd/bat 后代均以 Win32 API 验证未附着控制台，并验证终止后代时保留其他 Job。
+
+普通用户权限验证需在管理员 PowerShell 中执行控制器，以创建和最终删除一个临时本地普通用户；安装、目录写入、应用启动和卸载均在该用户的非管理员令牌下运行，不使用管理员令牌代测：
+
+```powershell
+./scripts/verify-windows-install.ps1 -InstallerPath build/windows/installer/FlutterDev-0.1.1+2-windows-x64-setup.exe -OutputDirectory build/windows/verification/standard-user
+```
+
+脚本不传 `/DIR`，验证真实的当前用户默认安装位置，记录用户 SID、管理员组成员关系和令牌提升状态，并在结束后清理本轮账号、任务、进程与配置文件。凭据只在内存中生成，不写入仓库、命令行或报告。流水线只在这些检查通过后上传安装包；相同运行源码的安装包可以复用缓存，但每次仍重新验证。

@@ -397,7 +397,13 @@ class _WorkbenchState extends State<Workbench> {
       ]) {
         controller.addListener(() => _draftChanged(draft));
       }
-      unawaited(Future<void>.microtask(() => _refreshGit(project)));
+      unawaited(
+        Future<void>.microtask(() {
+          // Selecting an imported project starts its read immediately. Do not
+          // launch a second Git process when this queued initial read runs.
+          if (mounted && !draft.gitLoading) return _refreshGit(project);
+        }),
+      );
     }
   }
 

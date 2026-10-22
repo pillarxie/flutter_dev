@@ -80,7 +80,7 @@ impl OwnedProcess {
         #[cfg(windows)]
         // Keep the initial thread suspended until it belongs to the job, so early SDK
         // descendants cannot escape ownership between CreateProcess and job assignment.
-        command.creation_flags(0x00000200 | 0x00000004); // NEW_PROCESS_GROUP | SUSPENDED
+        command.creation_flags(0x00000200 | 0x00000004 | 0x08000000); // NEW_PROCESS_GROUP | SUSPENDED | NO_WINDOW
         let mut child = command
             .spawn()
             .with_context(|| format!("Failed to start {}", program.display()))?;
@@ -495,6 +495,207 @@ mod windows_tests {
     use super::*;
     use std::fs;
     use tokio::io::AsyncReadExt;
+
+    const CONSOLE_REPORT: &str = "FLUTTER_DEV_CONSOLE_PROBE_REPORT";
+    const CONSOLE_STAY_ALIVE: &str = "FLUTTER_DEV_CONSOLE_PROBE_STAY_ALIVE";
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> isize;
+        fn GetConsoleProcessList(processes: *mut u32, count: u32) -> u32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn WaitForSingleObject(handle: isize, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ConsoleReport {
+        pid: u32,
+        console_window: isize,
+        console_processes: u32,
+    }
+
+    // Executed in a real test-binary subprocess, directly or beneath cmd.exe.
+    // Ordinary suite execution has no report path and does not enter the probe.
+    #[test]
+    fn console_probe_child() {
+        let Some(report) = std::env::var_os(CONSOLE_REPORT) else {
+            return;
+        };
+        let mut processes = [0u32; 16];
+        let console_window = unsafe { GetConsoleWindow() };
+        let console_processes =
+            unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
+        assert_eq!(
+            console_window, 0,
+            "background child acquired a console window"
+        );
+        assert_eq!(
+            console_processes, 0,
+            "background child is attached to a console"
+        );
+        fs::write(
+            report,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "console_window": console_window,
+                "console_processes": console_processes,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        println!("console-probe-ok");
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        if std::env::var_os(CONSOLE_STAY_ALIVE).is_some() {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        std::process::exit(7);
+    }
+
+    fn console_probe_args() -> Vec<String> {
+        [
+            "--exact",
+            "process::windows_tests::console_probe_child",
+            "--nocapture",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    }
+
+    fn console_probe_batch(root: &Path) -> PathBuf {
+        let program = root.join("console child 中文.bat");
+        let executable = command_path(&std::env::current_exe().unwrap());
+        fs::write(&program, format!(
+            "@echo off\r\n\"{executable}\" --exact process::windows_tests::console_probe_child --nocapture\r\nexit /b %errorlevel%\r\n"
+        )).unwrap();
+        program
+    }
+
+    async fn console_report(path: &Path) -> ConsoleReport {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Ok(content) = fs::read_to_string(path) {
+                    if let Ok(report) = serde_json::from_str(&content) {
+                        return report;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("console probe did not report readiness")
+    }
+
+    #[tokio::test]
+    async fn background_executable_and_batch_descendant_have_no_console() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let batch = console_probe_batch(root.path());
+        for (index, program) in [&executable, &batch].into_iter().enumerate() {
+            let report_path = root.path().join(format!("report-{index}.json"));
+            let environment = HashMap::from([(
+                CONSOLE_REPORT.into(),
+                report_path.to_string_lossy().into_owned(),
+            )]);
+            let mut process = OwnedProcess::spawn(
+                program,
+                &console_probe_args(),
+                Some(root.path()),
+                &environment,
+            )
+            .unwrap();
+            let primary_pid = process.id();
+            process.stdin.take();
+            let mut stdout = process.stdout.take().unwrap();
+            let (output, status) = tokio::time::timeout(Duration::from_secs(20), async {
+                tokio::try_join!(
+                    async {
+                        let mut output = String::new();
+                        stdout.read_to_string(&mut output).await?;
+                        Ok::<_, std::io::Error>(output)
+                    },
+                    async { process.wait().await.map_err(std::io::Error::other) },
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(status.code(), Some(7));
+            assert!(output.contains("console-probe-ok"), "{output}");
+            let report = console_report(&report_path).await;
+            assert_eq!(report.console_window, 0);
+            assert_eq!(report.console_processes, 0);
+            if index == 1 {
+                assert_ne!(
+                    Some(report.pid),
+                    primary_pid,
+                    "probe must be a batch descendant"
+                );
+            } else {
+                assert_eq!(Some(report.pid), primary_pid);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hidden_batch_termination_cleans_descendants_and_preserves_other_jobs() {
+        struct ProcessHandle(isize);
+        impl Drop for ProcessHandle {
+            fn drop(&mut self) {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let report_path = root.path().join("owned.json");
+        let environment = HashMap::from([
+            (
+                CONSOLE_REPORT.into(),
+                report_path.to_string_lossy().into_owned(),
+            ),
+            (CONSOLE_STAY_ALIVE.into(), "1".into()),
+        ]);
+        let mut owned = OwnedProcess::spawn(
+            &console_probe_batch(root.path()),
+            &[],
+            Some(root.path()),
+            &environment,
+        )
+        .unwrap();
+        let descendant = console_report(&report_path).await;
+        assert_ne!(Some(descendant.pid), owned.id());
+        let handle = ProcessHandle(unsafe {
+            OpenProcess(0x00100000 | 0x1000, 0, descendant.pid) // SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        });
+        assert_ne!(handle.0, 0);
+
+        let unrelated_report = root.path().join("unrelated.json");
+        let unrelated_environment = HashMap::from([
+            (
+                CONSOLE_REPORT.into(),
+                unrelated_report.to_string_lossy().into_owned(),
+            ),
+            (CONSOLE_STAY_ALIVE.into(), "1".into()),
+        ]);
+        let mut unrelated = OwnedProcess::spawn(
+            &std::env::current_exe().unwrap(),
+            &console_probe_args(),
+            None,
+            &unrelated_environment,
+        )
+        .unwrap();
+        console_report(&unrelated_report).await;
+        owned.terminate(Duration::from_millis(100)).await.unwrap();
+        assert_eq!(unsafe { WaitForSingleObject(handle.0, 5000) }, 0);
+        assert!(unrelated.child.try_wait().unwrap().is_none());
+        unrelated
+            .terminate(Duration::from_millis(100))
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn canonical_batch_paths_and_working_directory_preserve_output_and_exit_status() {

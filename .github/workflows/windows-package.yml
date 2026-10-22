@@ -20,6 +20,12 @@ jobs:
       FLUTTER_DEV_SETTINGS_PATH: ${{ github.workspace }}/build/package-smoke-settings/settings.json
     steps:
       - uses: actions/checkout@v4
+      - name: Restore package for identical runtime sources
+        id: package-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/windows/installer
+          key: windows-x64-flutter-3.38.3-rust-1.95-v1-${{ hashFiles('pubspec.yaml', 'pubspec.lock', 'lib/**', 'assets/**', 'windows/**', 'rust/Cargo.toml', 'rust/Cargo.lock', 'rust/src/**', 'rust_builder/**', 'scripts/package-windows.ps1') }}
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.95.0
@@ -32,11 +38,32 @@ jobs:
         run: flutter pub get
       - name: Analyze Flutter
         run: flutter analyze
+      - name: Verify first-frame bootstrap, user WebView data and project queries
+        run: flutter test test/bootstrap_test.dart test/windows_webview_test.dart test/project_git_test.dart
+      - name: Verify Rust including real Windows console and ownership tests
+        run: cargo test --manifest-path rust/Cargo.toml --locked
       - name: Build Windows release including Rust core
+        id: release
+        if: steps.package-cache.outputs.cache-hit != 'true'
         run: flutter build windows --release
       - name: Create installer and portable archive
+        id: installer
+        if: steps.package-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: ./scripts/package-windows.ps1
+      - name: Cache package bytes before independent verification
+        if: steps.package-cache.outputs.cache-hit != 'true' && steps.installer.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: build/windows/installer
+          key: ${{ steps.package-cache.outputs.cache-primary-key }}
+      - name: Create disposable project for startup and background-process checks
+        shell: pwsh
+        run: |
+          flutter create --no-pub --platforms=windows --project-name flutter_dev_windows_validation build/windows/verification/project
+          if ($LASTEXITCODE -ne 0) { throw 'Validation project creation failed.' }
+          git -C build/windows/verification/project init --initial-branch=main
+          if ($LASTEXITCODE -ne 0) { throw 'Validation repository creation failed.' }
       - name: Check installation and startup
         shell: pwsh
         run: |
@@ -44,7 +71,6 @@ jobs:
           $installer = Get-Item build/windows/installer/*-setup.exe
           $installDir = Join-Path $env:RUNNER_TEMP 'flutter-dev-install-smoke'
           $installLog = Join-Path $env:RUNNER_TEMP 'flutter-dev-install.log'
-          $app = $null
           try {
             $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installDir`"", "/LOG=`"$installLog`"") -Wait -PassThru
             if ($install.ExitCode -ne 0) { throw "Installer failed: $($install.ExitCode)" }
@@ -54,18 +80,19 @@ jobs:
             $nativeLibrary = Join-Path $installDir 'flutter_dev_core.dll'
             flutter test test/native_bridge_test.dart test/project_git_native_test.dart "--dart-define=FLUTTER_DEV_NATIVE_LIBRARY=$nativeLibrary"
             if ($LASTEXITCODE -ne 0) { throw 'Installed Rust core FFI check failed.' }
-            $app = Start-Process -FilePath (Join-Path $installDir 'flutter_dev.exe') -WorkingDirectory $installDir -PassThru
-            Start-Sleep -Seconds 10
-            if ($app.HasExited) { throw "Installed application exited during startup: $($app.ExitCode)" }
-            "Installation and 10-second startup smoke check passed."
+            ./scripts/verify-windows-startup.ps1 -ExecutablePath (Join-Path $installDir 'flutter_dev.exe') -OutputDirectory build/windows/verification/desktop -ProjectPath build/windows/verification/project -SdkPath $env:FLUTTER_ROOT
           } finally {
-            if ($null -ne $app -and -not $app.HasExited) { Stop-Process -Id $app.Id -Force }
             $uninstaller = Join-Path $installDir 'unins000.exe'
             if (Test-Path $uninstaller) {
               $uninstall = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
               if ($uninstall.ExitCode -ne 0) { throw "Uninstaller failed: $($uninstall.ExitCode)" }
             }
           }
+      - name: Verify default installation as a disposable standard user
+        shell: pwsh
+        run: |
+          $installer = Get-Item build/windows/installer/*-setup.exe
+          ./scripts/verify-windows-install.ps1 -InstallerPath $installer.FullName -OutputDirectory build/windows/verification/standard-user
       - name: Upload Windows packages
         uses: actions/upload-artifact@v4
         with:
@@ -77,11 +104,16 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
-      - name: Upload installation log
+      - name: Upload Windows verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-install-log-${{ github.run_number }}
-          path: ${{ runner.temp }}/flutter-dev-install.log
+          name: windows-verification-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/flutter-dev-install.log
+            build/windows/verification/desktop/*.json
+            build/windows/verification/desktop/*.log
+            build/windows/verification/standard-user/*.json
+            build/windows/verification/standard-user/*.log
           if-no-files-found: ignore
           retention-days: 7

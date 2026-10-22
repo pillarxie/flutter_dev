@@ -23,6 +23,7 @@ pub struct EmulatorInfo {
 
 pub(crate) struct DeviceManager {
     peers: Mutex<HashMap<String, Arc<ProtocolPeer>>>,
+    creation: Mutex<()>,
     events: broadcast::Sender<CoreEvent>,
     pub(crate) removed: broadcast::Sender<(String, String)>,
 }
@@ -31,19 +32,41 @@ impl DeviceManager {
         let (removed, _) = broadcast::channel(128);
         Self {
             peers: Mutex::new(HashMap::new()),
+            creation: Mutex::new(()),
             events,
             removed,
         }
     }
+    async fn live_peer(&self, sdk_path: &str) -> Option<Arc<ProtocolPeer>> {
+        self.peers
+            .lock()
+            .await
+            .get(sdk_path)
+            .filter(|peer| !peer.is_closed())
+            .cloned()
+    }
     async fn peer(&self, sdk_path: &str) -> Result<Arc<ProtocolPeer>> {
-        let sdk = crate::sdk::resolve_sdk(None, Some(sdk_path.into())).await?;
-        let mut peers = self.peers.lock().await;
-        if let Some(peer) = peers.get(&sdk.path) {
-            if !peer.is_closed() {
-                return Ok(peer.clone());
-            }
+        // Resolve path aliases without starting Flutter. A live daemon already
+        // belongs to this SDK, so refreshing its lists needs no version probe.
+        let key = tokio::fs::canonicalize(sdk_path)
+            .await
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| sdk_path.to_owned());
+        if let Some(peer) = self.live_peer(&key).await {
+            return Ok(peer);
         }
-        if let Some(peer) = peers.remove(&sdk.path) {
+        // Coordinate misses without holding the peer map during SDK probing:
+        // another SDK's live daemon must remain responsive while this one starts.
+        let _creation = self.creation.lock().await;
+        if let Some(peer) = self.live_peer(&key).await {
+            return Ok(peer);
+        }
+        let sdk = crate::sdk::resolve_sdk(None, Some(sdk_path.into())).await?;
+        if let Some(peer) = self.live_peer(&sdk.path).await {
+            return Ok(peer);
+        }
+        let previous = self.peers.lock().await.remove(&sdk.path);
+        if let Some(peer) = previous {
             let _ = peer.terminate().await;
         }
         let peer = ProtocolPeer::spawn(
@@ -100,7 +123,7 @@ impl DeviceManager {
             let _ = peer.terminate().await;
             return Err(error);
         }
-        peers.insert(sdk.path, peer.clone());
+        self.peers.lock().await.insert(sdk.path, peer.clone());
         Ok(peer)
     }
     pub(crate) async fn devices(&self, sdk_path: &str) -> Result<Vec<DeviceInfo>> {
@@ -178,6 +201,8 @@ impl DeviceManager {
         .context("Emulator launched but no ready device was reported within 120 seconds")?
     }
     pub(crate) async fn shutdown(&self) {
+        // Drain only after an in-flight creation has finished inserting its peer.
+        let _creation = self.creation.lock().await;
         let peers = std::mem::take(&mut *self.peers.lock().await);
         for peer in peers.values() {
             let _ = peer
@@ -215,9 +240,178 @@ fn matches_emulator(d: &DeviceInfo, id: &str) -> bool {
     d.id == id || d.emulator_id.as_deref() == Some(id)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, path::Path};
+
+    fn counting_sdk() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let script = r#"import json, os, sys, time
+root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+with open(os.path.join(root, 'invocations.jsonl'), 'a') as log:
+    log.write(json.dumps(sys.argv[1:]) + '\n')
+if '--version' in sys.argv:
+    if os.path.exists(os.path.join(root, 'block-probe')):
+        with open(os.path.join(root, 'probe-started'), 'w') as marker:
+            marker.write('ready')
+        deadline = time.monotonic() + 20
+        while not os.path.exists(os.path.join(root, 'release-probe')):
+            if time.monotonic() >= deadline:
+                sys.exit(2)
+            time.sleep(.01)
+    print(json.dumps({'frameworkVersion': '3.fixture', 'dartSdkVersion': '3.fixture'}))
+    sys.exit(0)
+for line in sys.stdin:
+    for request in json.loads(line):
+        method = request['method']
+        result = [] if method == 'device.getDevices' else None
+        if method == 'emulator.getEmulators':
+            result = [{'id': 'fixture', 'name': 'Fixture', 'platformType': 'android'}]
+        print(json.dumps([{'id': request['id'], 'result': result}]), flush=True)
+        if method == 'daemon.shutdown':
+            sys.exit(0)
+        if method == 'fixture.exit':
+            sys.exit(17)
+"#;
+        #[cfg(windows)]
+        {
+            fs::write(bin.join("fixture.py"), script).unwrap();
+            fs::write(
+                bin.join("flutter.bat"),
+                "@echo off\r\npython \"%~dp0fixture.py\" %*\r\nexit /b %errorlevel%\r\n",
+            )
+            .unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let launcher = bin.join("flutter");
+            fs::write(&launcher, format!("#!/usr/bin/env python3\n{script}")).unwrap();
+            fs::set_permissions(launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        directory
+    }
+
+    fn invocations(sdk: &Path) -> Vec<Vec<String>> {
+        fs::read_to_string(sdk.join("invocations.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn concurrent_lists_reuse_live_peer_and_reprobe_after_daemon_death() {
+        let sdk = counting_sdk();
+        let path = sdk.path().canonicalize().unwrap();
+        let alias = sdk.path().join(".");
+        let path = path.to_str().unwrap();
+        let (events, _) = broadcast::channel(100);
+        let manager = DeviceManager::new(events);
+        let (devices, emulators) = tokio::join!(
+            manager.devices(path),
+            manager.emulators(alias.to_str().unwrap())
+        );
+        assert!(devices.unwrap().is_empty());
+        assert_eq!(emulators.unwrap()[0].id, "fixture");
+        let first = manager.peer(path).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &manager.peer(path).await.unwrap()));
+        assert_eq!(
+            invocations(sdk.path()),
+            [vec!["--version", "--machine"], vec!["daemon"]]
+        );
+
+        first
+            .request("fixture.exit", json!({}), Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !first.is_closed() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("daemon exit was not observed");
+        let (devices, emulators) = tokio::join!(manager.devices(path), manager.emulators(path));
+        devices.unwrap();
+        emulators.unwrap();
+        assert!(!Arc::ptr_eq(&first, &manager.peer(path).await.unwrap()));
+        assert_eq!(
+            invocations(sdk.path()),
+            [
+                vec!["--version", "--machine"],
+                vec!["daemon"],
+                vec!["--version", "--machine"],
+                vec!["daemon"],
+            ]
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn separate_sdks_keep_their_own_live_daemon_without_reprobing() {
+        let first = counting_sdk();
+        let second = counting_sdk();
+        let (events, _) = broadcast::channel(100);
+        let manager = DeviceManager::new(events);
+        let first_peer = manager.peer(first.path().to_str().unwrap()).await.unwrap();
+        let second_peer = manager.peer(second.path().to_str().unwrap()).await.unwrap();
+        assert!(!Arc::ptr_eq(&first_peer, &second_peer));
+        assert!(Arc::ptr_eq(
+            &first_peer,
+            &manager.peer(first.path().to_str().unwrap()).await.unwrap()
+        ));
+        assert_eq!(invocations(first.path()).len(), 2);
+        assert_eq!(invocations(second.path()).len(), 2);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_sdk_probe_does_not_block_another_sdks_live_daemon() {
+        let ready_sdk = counting_sdk();
+        let slow_sdk = counting_sdk();
+        fs::write(slow_sdk.path().join("block-probe"), "").unwrap();
+        let (events, _) = broadcast::channel(100);
+        let manager = Arc::new(DeviceManager::new(events));
+        manager
+            .devices(ready_sdk.path().to_str().unwrap())
+            .await
+            .unwrap();
+        let starting = {
+            let manager = manager.clone();
+            let path = slow_sdk.path().to_string_lossy().into_owned();
+            tokio::spawn(async move { manager.devices(&path).await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !slow_sdk.path().join("probe-started").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("slow SDK probe did not reach its barrier");
+        assert!(!starting.is_finished());
+        let available = tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.devices(ready_sdk.path().to_str().unwrap()),
+        )
+        .await;
+        // Always release the owned probe before checking the responsiveness
+        // assertion, so even a regression cleans up both fixture daemons.
+        fs::write(slow_sdk.path().join("release-probe"), "").unwrap();
+        starting.await.unwrap().unwrap();
+        manager.shutdown().await;
+        assert!(available
+            .expect("live SDK was blocked by another SDK probe")
+            .unwrap()
+            .is_empty());
+        assert_eq!(invocations(ready_sdk.path()).len(), 2);
+        assert_eq!(invocations(slow_sdk.path()).len(), 2);
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn emulator_launch_waits_for_device_added_not_command_ack() {
         let sdk = crate::session::tests::fake_sdk(false);
@@ -232,6 +426,7 @@ mod tests {
         assert!(start.elapsed() >= Duration::from_millis(140));
         manager.shutdown().await;
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_device_enable_cleans_unregistered_daemon() {
         let sdk = crate::session::tests::fake_sdk(false);

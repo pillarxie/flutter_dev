@@ -135,10 +135,38 @@ void main() {
       expect(tester.widget<Text>(key('project-branch-/repo/app')).data, 'main');
       await addProject(tester, '/plain');
       expect(bridge.gitRequests, containsAll(['/repo/app', '/plain']));
+      expect(
+        bridge.gitRequests.where((path) => path == '/plain'),
+        hasLength(1),
+      );
       expect(key('git-branch-select-/plain'), findsNothing);
       expect(find.text('Git 分支'), findsNothing);
     },
   );
+
+  testWidgets('importing a selected project shares its pending Git read', (
+    tester,
+  ) async {
+    final pending = Completer<ProjectGitInfo?>();
+    final bridge = FakeBridge()..gitResponse = (_) => pending.future;
+    await mount(tester, bridge);
+    await tester.tap(key('add-project'));
+    await tester.pumpAndSettle();
+    await tester.enterText(key('add-project-path'), '/repo/imported');
+    await tester.tap(key('add-project-discover'));
+    await tester.pumpAndSettle();
+    await tester.tap(key('add-project-confirm'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(bridge.gitRequests, ['/repo/imported']);
+    pending.complete(info('main'));
+    await tester.pumpAndSettle();
+    expect(bridge.gitRequests, ['/repo/imported']);
+    expect(
+      tester.widget<Text>(key('project-branch-/repo/imported')).data,
+      'main',
+    );
+  });
 
   testWidgets(
     'switch updates sibling projects and re-resolves SDK without stealing selection',
