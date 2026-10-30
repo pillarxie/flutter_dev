@@ -178,3 +178,207 @@ macOS release 构建通过：`build/macos/Build/Products/Release/Flutter Dev.app
 macOS 显式启用原生窗口缩放并使用560×500最小内容区；Windows 保留可缩放系统边框并按显示器 DPI 计算最小内容尺寸；Linux 显式允许缩放并设置最小视图尺寸。回归测试覆盖1000→560→1000跨断点时构建名称输入的内容和焦点保留，SDK 草稿在560×500与恢复窗口后的保留、主题切换及保存/清除入口可达。静态分析无问题，六个修改 Dart 文件格式检查通过；全量 Flutter 回归104项通过、3项条件跳过。最终审查移除额外命令复制入口后，构建/外观与实际渲染22项定向测试全部通过。
 
 最终 macOS Release 构建通过，产物为 `build/macos/Build/Products/Release/Flutter Dev.app`（60.6MB）。Windows/Linux 未进行完整构建与实机验证；原生电脑控制工具在检查 macOS 窗口时超时，因此真实鼠标拖拽缩放尚未验收，窗口尺寸布局已通过控件测试。未改动 Rust/API，未重新执行目标项目的真实打包或修改个人 SDK 配置。
+
+## 项目 Git 分支识别与切换
+
+2026年10月15日。新增、恢复和选择项目时读取所属 Git 仓库，在侧栏显示当前分支，在项目配置页提供本地分支选择及刷新。支持普通 `.git` 目录、worktree 的 `.git` 文件和仓库子目录中的项目；非仓库隐藏分支控件，分离 HEAD 显示短提交号，无提交仓库显示当前分支及说明。分支信息实时读取，不写入持久化设置。
+
+Rust 使用参数数组执行 Git，输出与执行时间有界，仅切换已有本地分支；不强制覆盖、自动 stash 或创建远程分支。禁用 checkout hooks/fsmonitor，并清除继承的索引、对象库和仓库路径等 Git 环境变量，防止操作其他索引或仓库。切换冲突显示原始错误并保留已知分支；读取失败可重试。同仓库项目同步切换和手动刷新结果，迟到读取不能覆盖更新的请求；成功切换后重新检查相关项目 SDK，已运行会话仍使用原有 SDK。
+
+本次完整 Rust 75 项测试通过，严格 clippy 和格式检查通过；其中10项 Git 测试使用专用临时仓库，覆盖普通/子目录/非仓库、worktree及已占用分支、无提交、分离 HEAD、未提交文件冲突保留、远端分支拒绝、选项注入拒绝、hooks禁用、输出上限和继承环境污染。环境测试通过独立测试子进程注入其他仓库路径及替代索引，验证切换后真实索引与工作树一致、替代索引和外部仓库未变。
+
+最终完整 Flutter 115 项测试通过，4项条件跳过（两项真实 FFI 和两项按需设计截图）；两项真实 FFI 已单独指定重新构建的动态库与隔离设置文件通过，包含新增 Git API 的 Unicode 分支、子目录识别、无提交仓库及错误参数调用。新增12项 Git 控件测试覆盖同步刷新、失败/重试、项目选择和销毁后的迟到结果、更新请求优先，以及浅深色1400×800和560×500布局。完整 analyze 无问题，修改的6个 Dart 源码/测试文件格式检查和 `git diff --check` 通过。另用实际控件生成浅深色宽/窄窗及菜单共8张临时截图并检查布局，无溢出；截图使用样例数据，不代表用户仓库实机操作已验收。Windows/Linux 尚未实机验证，未操作用户业务仓库或个人设置。
+
+最终 macOS Release 构建通过：`build/macos/Build/Products/Release/Flutter Dev.app`（60.8MB）。末次异步请求保护修复后再次增量构建通过，产物包含最终代码；未自动重启已运行的旧实例，需退出并重新打开新应用包。
+
+## 后台构建与任务详情入口
+
+2026年10月15日。构建窗口在准备、运行和停止阶段均允许关闭，关闭只释放窗口轮询，不停止 Rust 拥有的构建进程。左侧固定“构建任务”入口显示进行中数量，支持跨项目查看本次运行内的近期任务；点击任务打开只读详情，重新分页读取日志，可停止任务或打开产物目录。原窗口关闭后，工作台只在有活跃任务时刷新有界快照，不读取后台日志；任务完成后停止自动轮询。历史沿用 Rust 的最多32条限制，不新增持久化历史或第二套任务状态。
+
+新增官方桥接 API `list_builds`，从 Rust 读取按构建 ID 倒序的权威快照。工作台隔离启动前的迟到列表结果；启动请求尚未返回时关闭窗口，仍跟踪请求并接收任务。退出应用时确认后台任务，等待尚未返回的启动请求注册后再执行核心清理，并拒绝退出过程中新发起的构建，避免进程遗漏。
+
+本次 `flutter analyze` 无问题，19项构建窗口 / 任务列表 / 完整工作台定向测试通过；全套 Flutter 测试126项通过，2项设计预览因默认未启用而跳过。全套运行加载新构建的原生库并使用专用临时设置文件，真实 FFI 新增验证已结束任务的列表、状态和退出码，以及 shutdown 后列表清空。Rust 全套76项测试、严格 clippy、Rust / Dart 格式和 `git diff --check` 通过。新增核心测试验证跨项目活跃/终态快照、数值排序和列表读取不持有日志锁。
+
+界面回归覆盖关闭不停任务、迟到启动结果、关闭后跨项目重开详情和日志、后台完成后保留结果且停止轮询、停止/打开产物目录、刷新失败恢复、退出等待 pending start、过期列表不覆盖新任务、销毁后不再轮询，以及浅深色560px窄窗口。此次未重新执行真实 Flutter SDK 样例构建；Windows / Linux 未实机验证。工作区既有 Git 分支功能等未提交改动保留，不计作本次新增功能。
+
+本次 macOS Release 编译链接通过，产物 `build/macos/Build/Products/Release/Flutter Dev.app`（60.9MB）。未重启用户正在运行的应用，新功能需重启新构建后加载。
+
+## 参数和响应的 JSON 节点展开/收起
+
+2026年10月15日。将原先仅用于请求 payload 字段的节点树扩展至任意 Query、表单字段、JSON 请求正文和 JSON 响应正文中的对象及数组。JSON 请求对象保留名称—值两列，根数组与响应正文使用整棵树；嵌套容器可独立展开/收起，空容器保留摘要。原始/格式化复制内容不受折叠影响；标签切换、原始视图切换和同请求刷新保留节点状态，切换请求重置。不同分区与重复字段的状态隔离，JSON 顶层字段标识编码，避免特殊字段名与嵌套路径碰撞。非法、截断 JSON 和标量内容继续显示为可选文本，沿用每棵树200个可见节点、12层及正文预览/复制上限。
+
+本次完整 `flutter analyze --no-pub` 无问题；38项网络格式化、详情、面板、窄工作台及 DevTools 定向测试通过，包含新增7项交互测试。覆盖非 payload 字段、Query、JSON 请求与响应根数组、嵌套容器、分区状态隔离、特殊字段名、复制、刷新保留和请求重置，以及280px详情区的深浅色布局。另1项临时实际控件预览测试通过，检查720px与280px详情区的浅深色参数/响应共8张截图，节点缩进和换行无布局溢出；截图使用样例数据并保存在临时目录，临时预览测试已移除。本轮只修改 Flutter 展示层及相关测试/文档，未重新执行全套 Flutter、Rust、实际 FFI、真实目标网络采集或桌面打包验收。
+
+## 网络请求列表清空入口
+
+2026年10月15日。将搜索框右侧仅有垃圾桶图标的入口改为带“清空”文字的按钮，沿用既有本地清空逻辑：清空列表和选中详情，通过 VM 时间边界过滤旧记录与迟到结果，保留后续请求采集。使用指南同步标明入口位置。
+
+本次12项网络面板/560px完整工作台定向测试通过，包括点击“清空”后计数归零、刷新不恢复旧请求、首次读取期间清空及迟到结果隔离；420px浅深色均验证按钮可点击且布局无异常。完整 analyze、修改文件 Dart 格式及 `git diff --check` 通过。未重新打包桌面应用或执行真实目标网络采集。
+
+随后按用户要求重新执行 `flutter build macos --release`，构建成功，产物为 `build/macos/Build/Products/Release/Flutter Dev.app`（60.9MB），包含 JSON 节点交互和带文字的“清空”入口。已检查应用可执行文件及 `flutter_dev_core.framework` 已打入包内；未重启正在运行的应用，未将构建通过视为实机交互回归。
+
+## 项目标题下的紧凑分支入口
+
+2026年10月15日。移除项目标题下方的“启动配置”副标题和正文中的整块“Git 分支”卡片，在标题下以分支图标、分支名、下拉箭头及小型刷新按钮展示当前分支。分支行独立使用标题区可用宽度，窄窗口不受右侧启动/构建按钮挤压；长分支省略并可悬停查看，入口随标题固定。复用现有选择器菜单、键盘和焦点行为，默认表单选择器保持原样；切换、刷新、同仓库同步及迟到结果隔离逻辑未变。首次加载显示禁用的刷新进度图标，错误和无提交提示紧凑展示于正文路径下，非 Git 项目隐藏入口。README 和使用指南同步入口位置。
+
+48项 Git、配置、通用选择器和工作台定向测试通过，另1项临时控件预览测试通过；完整 analyze、修改文件 Dart 格式及 `git diff --check` 通过。覆盖首次加载禁用、切换/读取失败重试、同仓库与迟到结果、游离 HEAD/无提交仓库，以及浅深色1400px和560px长分支菜单、刷新可点击和正文滚动后头部位置不变。已检查浅深色宽/窄窗及菜单共8张实际控件截图，分支行和菜单无布局溢出；截图保存在临时目录，使用样例数据，临时测试已移除。本轮未重新运行 Rust、实际 FFI、用户真实仓库分支操作或 Windows/Linux 实机验收。
+
+本次 `flutter build macos --release --no-pub` 构建成功，更新后的应用包为 `build/macos/Build/Products/Release/Flutter Dev.app`（60.9MB），已检查主程序和 Rust 核心 framework 存在。未重启用户正在运行的旧实例。
+
+## 六项日常开发效率增强
+
+2026年10月15日。实现项目运行草稿、上次启动及多套命名配置持久化；原始环境变量/参数草稿保留，配置另存、更新、重命名、删除及跨项目隔离。Rust 串行校验并原子保存，Flutter 合并草稿保存并展示失败重试。自动热重载按项目保存开关、更新已有与新会话，Rust 有界扫描和去抖，复用 DAP 热更新，遵循模式和显式能力；页面离开不停止监控，会话终止清理。
+
+网络新增方法/状态多选、请求右键按需复制 POSIX cURL、响应正文搜索及分区全部展开/收起。复制保留原始 URI、重复 Headers 和完整文本正文，拒绝不完整/二进制/超限内容；实际 HttpProfiler 顶层发送 endTime、无 Content-Type 时抑制 curl 默认表单头、引号及以 @ 开头正文均有回归。日志支持错误筛选、明确的暂停跟随、完整带空格 POSIX/Windows 路径与 package/file URI 定位，点击通过可配置编辑器参数数组打开，并保留日志原文选择复制。
+
+工作台增加能力受限的启动/停止/热更新/搜索/项目会话切换快捷键和提示；页签使用 Cmd/Ctrl 数字，不截获 macOS Option 数字文本。测试页和独立项目入口使用真正的 flutter test --machine，支持文件发现、运行全部/文件/机器事件发现的单测试、精确失败重跑、停止、错误与尾日志读取、关闭后重连；核心管理进程及有界快照，退出保护待启动会话与测试。560px 下标题、分支与项目操作适当分行；通用选择器保留默认表单样式，紧凑入口左对齐。
+
+本次最终全套 Flutter 183项通过、5项条件跳过（两项设计预览、原有两项 FFI、新增真实 SDK FFI）；使用最终重建原生库和各自专用临时设置文件，另外单独执行原有会话/构建 FFI、Git FFI、新增效率功能 FFI 共3项全部通过。新增实际 FFI 用可丢弃 Flutter 工程验证多配置与 Unicode 字段跨设置更新保留、带百分号与 emoji 的源码坐标、编辑器参数字面量传递、真实 Flutter 测试失败和仅重跑该失败名称，不启动个人编辑器。最后紧凑选择器对齐调整后36项选择器/Git/效率功能定向测试再次通过。完整 flutter analyze 无问题，24个修改的 Dart 源码/测试文件格式及 git diff --check 通过。
+
+Rust 最终全套96项、严格 all-targets Clippy 与格式检查通过。新增覆盖旧设置兼容、原子保存保留字段、原始草稿/容量校验、相同开关值不丢待重载变更、显式 capability=false、去抖/禁用/停止释放、源码普通百分号与 UTF-16 列、机器事件关联/失败码/精确正则/取消/退出迟到注册及 Windows 直接 dart.exe 执行测试命令。并行检查曾暴露编辑器测试把观察窗口当作解释器已运行的时序假设；已改为就绪文件和有界轮询，最终96项全量通过。代码交叉审查还修复配置晚恢复丢元信息、保存期间新草稿中止既有启动、终态漏尾日志及带空格源码路径等问题。
+
+真实自动热重载使用本轮创建、带所有权标记的 macOS Flutter 3.38.3 / Dart 3.10.1 样例，命令为 sdk_smoke 的 --auto-reload 模式，设置路径为此次专用临时文件。通过正式核心/DAP 启动，修改 Dart 后实际 reassemble 输出新标记，仅发生一次自动热重载；关闭开关后再修改不触发，随后手动热重载、热重启与停止均通过。关闭测试拥有的会话和 daemon，未操作用户业务工程。该可复现模式及安全前提已写入 development.md。
+
+另7项临时实际控件预览测试通过，检查浅深色1400px/560px配置和编辑器设置，以及560px测试面板、340px日志/网络共11张截图；窄窗口项目名完整可读，操作、配置与筛选控件无布局溢出。截图使用样例和测试字体，少量汉字回退缺字不作为正式宿主字体验收；临时测试已删除，图片保留在临时目录。Windows/Linux 本轮未实机运行，测试面板目前支持宿主单元/Widget测试，不包含设备集成测试调度、覆盖率或测试名称静态解析。README、usage、compatibility-baseline、implementation-scope及需求文档同步本轮实现与边界。
+
+本次 macOS Release 构建成功：`build/macos/Build/Products/Release/Flutter Dev.app`（62.5MB），包含六项增强及最终窄窗布局。已核验主程序和 Rust 核心 framework 打入包中；未重启用户正在运行的旧实例，未将样例验收等同于用户业务工程回归。
+
+## 自动热重载系统监听与漏触发修复
+
+2026年10月15日至16日。Rust 按 canonical 项目路径共享 `notify` 系统目录监听，正常每8秒进行有界轮询校验，监听或扫描故障按2秒退避并恢复；事件通过原子标记合并，600ms防抖，创建、删除、重命名、原子替换及目录重建均参与检查。首次及原生保存批次校验内容摘要，轮询复用未变元数据的摘要，原生事件与轮询共用基线去重。会话独立消费变更版本，忙锁不消费，请求中新增版本在完成后补执行，编译失败仅消费此次尝试，不无限重试。
+
+依赖范围依据最近祖先 package_config、lock 来源、pubspec/overrides 及 workspace 解析，覆盖目录外、传递及覆盖的本地依赖 lib，排除 hosted/Git 缓存和 SDK。配置损坏或曾有配置暂时缺失时保留旧根，扫描失败不清基线。新依赖仍需用户执行 pub get；不自动热重启或编译原生代码。读取、目录数、深度和文件数维持明确上限，详细限制见 usage.md。未修改公开 Rust API，未手写桥接生成结果。
+
+新增9项自动热重载回归和2项 Session 回归，覆盖原生变化4秒内响应、连续变化合并、8秒周期去重、可控屏蔽事件后轮询恢复、注入监听失败后保留基线、共享监控及最后订阅释放、本地依赖图、配置损坏/缺失、编译失败与禁用/停止、忙锁保留及请求中再保存补执行。最终完整 Rust 103项通过，默认并发11.69秒、受控4线程17.07秒；严格 all-targets Clippy、Rust格式及 git diff --check 通过。首次全量与其他构建并行时，原有两项 DevTools 测试在 starts.jsonl 的3秒启动观察窗口超时；未改这些测试或生产逻辑，独立7项及后续两轮完整回归均通过。
+
+默认工具执行沙箱静默屏蔽 macOS FSEvents：原生专项的4秒上限会失败，而较长等待可能仅由8秒轮询通过。故原生专项及最终真实样例在允许宿主文件事件的执行环境运行；额外可控事件屏蔽用例验证轮询兜底。不能把沙箱内延迟触发等同于原生监听通过，正式应用的 Release entitlements 未启用 App Sandbox。
+
+最终真实验收使用本轮创建且应用及外部依赖均有所有权标记的可丢弃 macOS 样例，专用设置位于临时目录；SDK Flutter 3.38.3 / Dart 3.10.1。运行 sdk_smoke 的 `--auto-reload-dependencies`：应用保存至实际 reassemble 输出1.0139秒，目录外 path 包保存0.8105秒，均满足6秒上限；再等待10秒，自动重载总数严格为两次。关闭开关后两处保存均不自动触发，手动重载实际读到两处最新标记，热重启、停止收敛 Ended 和 shutdown_core 均成功，临时样例残留进程为0。复现约定与命令已写入 development.md；未操作用户业务工程或个人应用设置。
+
+Flutter analyze 无问题，完整 Flutter 测试183项通过、5项条件跳过；另重建动态库并使用隔离设置执行实际 FFI 会话回归1项通过。本次无界面改动，未重新执行截图验收；Windows/Linux 的系统监听未实机验证。
+
+最终 `flutter build macos --release` 成功，产物 `build/macos/Build/Products/Release/Flutter Dev.app`（65.4MB）。主程序包含 arm64/x86_64，Rust核心 framework 已打入应用，`codesign --verify --deep --strict` 通过。未替换或重启用户正在运行的旧应用，打包及样例验证不代表用户业务工程已回归。
+
+## 构建目标版本展示
+
+2026年10月16日。构建配置、任务列表和详情新增只读 `version+build_number` 展示，例如 `1.2.3+45`。Rust 从目标项目 `pubspec.yaml` 读取版本并应用当前参数中的 `--build-name` / `--build-number` 覆盖，支持等号和独立参数值、重复参数，以及独立 `--` 分隔；其他带值参数的内容不会被误作版本选项。无效或缺失的 pubspec 版本显示未配置，缺少的版本字段不臆造平台默认值。界面提供刷新和失败重试，参数变化200ms防抖并隔离迟到结果；不修改项目文件或注入版本参数。
+
+新增 `BuildVersion` 与 `read_build_version` API，官方重新生成双端桥接；`BuildSnapshot.version` 固定记录创建任务时的配置版本，列表和详情复用快照，不受后续 pubspec / 参数修改影响。读取失败仅提示并记录日志，不新增构建拦截；旧快照没有版本时显示“未读取”。文件读取保持1 MiB上限，Rust 继续负责构建和配置读取，Flutter 只保存预览及展示投影。
+
+本次 Flutter analyze 无问题，构建相关27项定向测试通过；全套193项通过、3项条件跳过（两项设计预览、需要真实SDK的生产力集成样例）。全套运行已加载此次构建的原生库，专用临时设置文件隔离个人设置；实际 FFI 验证 pubspec 读取、两种参数覆盖、任务开始后修改 pubspec 仍保留快照版本，以及预览读取新版本。界面覆盖参数无效、读失败重试、手动刷新、预设切换、焦点保留、迟到结果、销毁时取消读取、历史任务及浅深色窄窗口。
+
+Rust 格式和严格 all-targets Clippy 通过，13项构建专项测试通过（其中5项新增版本解析及快照用例）。首次沙箱全套108项中105项通过，3项原生文件监听 / 自动热重载测试因未收到事件而超时；正常权限下重跑9项自动热重载与1项会话专项全部通过，包括这3项失败。该行为与既有沙箱静默屏蔽 FSEvents 的已知限制一致，本轮未修改监听实现。Dart 格式与 git diff --check 通过。
+
+本轮未执行用户业务工程打包、修改业务项目版本或重新验收 Windows / Linux；工作区既有未提交改动保留。
+
+本次 macOS Release 构建成功：`build/macos/Build/Products/Release/Flutter Dev.app`（65.6MB），包含版本预览与新任务版本快照。未重启用户正在运行的旧应用，需重启新构建后加载。
+
+## 同设备 iOS 多项目日志隔离
+
+2026年10月20日。真实双项目复现确认两个问题：Flutter SDK 按可执行文件名 `Runner` 读取设备日志，不同应用的输出会进入同一通道；VM Service 地址也从这个共享日志源发现，两个独立 bundle 的会话实际曾连接到相同 VM URI。仅在工作台按 sessionId 分页或换成 VM 输出订阅不足以修复错误的调试连接。
+
+修复对所选 SDK 明确识别的 iOS Debug / Profile launch（含 noDebug）分配独立 VM 服务端口，设备/宿主端口一致，并显式分离 DDS 端口，使模拟器和设备发现时按端口过滤。端口在本工具活动会话间不复用，终态释放逻辑预约，不占着监听 socket 阻止模拟器绑定。已有端口参数统一校验；设备发现错误让会话明确失败，保留 Preparing、SDK 回退信息及终态事件，不静默退回混合日志通道。
+
+Rust 按当前会话 URI 订阅 VM Stdout / Stderr，支持 DDS 在订阅确认前发送的启动历史、跨事件 UTF-8、多行、独立换行及64 KiB长行分段；消息上限1 MiB，保留核心原有日志容量和分页。共享设备 stdout / console 及无前缀续行不入库；DAP 进度事件展示启动状态，工具 stderr 和编译诊断保留。同 URI 热重启复用连接，URI 变化和停止会取消旧连接；日志连接失败或断开明确 warning，不自动重放历史。附加、Release 和非 iOS 路径维持原实现，未把它们声明为已修复。
+
+真实验收使用 Flutter 3.38.3 / Dart 3.10.1、已启动的 iPhone 17 Pro / iOS 26.0 模拟器，以及本轮创建的两个不同 bundle ID、均带所有权标记的可丢弃项目。最终样例两会话的 VM URI 端口分别61450和61473，进程分别85202和85220；各自收到普通 print、多行 print 续行、stderr.writeln 和 debugPrint，未出现另一项目 marker。初次启动及分别热重启后各忽略首批积压日志，再持续检查新输出10秒，三阶段全部通过；热重启改变对应 isolate 且保持 VM 归属。样例使用临时设置，退出时清理其拥有的会话与 daemon，未操作用户业务工程或个人设置。复现命令与样例约定见 development.md 的 `session_logs_smoke`。
+
+最终 Rust 全套125项串行测试通过，严格 all-targets Clippy、格式和 `git diff --check` 通过。Flutter analyze 无问题，日志面板与工作台28项定向测试通过，包含同代次会话切换、旧分页迟到、深浅色和窄窗口。重新构建原生动态库并以专用临时设置执行实际 FFI 会话回归，1项通过，涵盖 SDK 回退 warning 与终态事件。没有修改 Flutter 布局或公开桥接 API，不重新生成桥接、不重复截图验收。真实 SDK 编译失败、iOS 实体设备、Profile / noDebug 目标、附加 / Release 隔离及 Windows / Linux 宿主尚未实机验收。最终测试的两个样例进程均已停止，专用样例应用已从模拟器卸载。
+
+本次 `flutter build macos --release` 成功，产物 `build/macos/Build/Products/Release/Flutter Dev.app`（66.6MB）。未自动替换或重启用户正在运行的实例，需要退出旧工作台后启动新构建，并重新启动项目会话加载隔离逻辑。
+
+## Windows 安装包流水线
+
+2026年10月21日。新增 Windows x64 专用 Actions 工作流，以当前源码构建 release，由 cargokit 同时编译和打包 Rust 核心。PowerShell 脚本暂存完整发布目录并附带 Visual C++ x64 CRT，Inno Setup 生成当前用户安装器，另提供便携 ZIP 和 SHA256 文件；产物保存30天。流水线使用临时设置文件，检查静默安装、已安装 Rust DLL 的真实 Git FFI 调用、应用启动10秒及卸载。进程存活检查不代表全部界面和 SDK 功能已验证。
+
+本机为 macOS，Flutter analyze、两个工作流的 actionlint 和 git diff --check 通过。首次远端执行发现 job env 不支持 runner.temp 上下文，已改用工作区 build 内隔离设置路径，并同步修正原有 desktop 工作流。干净 checkout 的应用分析还扫入 cargokit 的独立 Dart 工具，因其依赖尚未解析产生133项问题；根分析配置现排除随项目交付的 cargokit 目录，不修改工具源码，仍检查应用、自有插件与测试。
+
+修正后的 [Windows 运行](https://github.com/pillarxie/flutter_dev/actions/runs/39567042776) 已通过静态分析、Release 编译、安装器/便携 ZIP 生成和静默安装；安装后的真实 FFI 检查发现 Git 不接受 Rust canonicalize 返回的 Windows verbatim 路径。现在仅对 Git 命令参数转换盘符/UNC 前缀，保留文件访问和 API 返回的 canonical 路径；FFI 测试按目录身份比较，避免两种合法路径表示的字符串差异。
+
+三平台 baseline 还发现 Windows SDK 的 workspaceFolder 展开产生 verbatim 混合分隔符路径，现仅在 Windows 统一分隔符；新增 Unicode 真实目录解析测试。Workspace 两项测试的 Unix 绝对路径样例改用临时目录，不改生产校验合同。本机 Git 11项、SDK 9项、Workspace 5项定向测试通过，Cargo 格式与严格 lib/tests Clippy 通过。Windows 修复后的完整结果以随后远端运行记录为准，暂不记为已通过。未执行 Windows 人工交互、业务工程回归或安装器代码签名。
+
+[a28507f 对应安装包运行](https://github.com/pillarxie/flutter_dev/actions/runs/39568377256) 已通过 Release、安装器生成、静默安装、安装后 Git FFI、应用存活10秒及卸载，产物已上传。对应完整 Windows baseline 的76项 Rust 测试通过，但全套 Flutter FFI 仍发现 cmd.exe 无法执行 canonical verbatim Flutter 批处理路径，影响 SDK 探测。随后仅在批处理调用处转换程序/当前目录/独立路径参数，复用 Git 路径转换；普通 exe、shell 字符拦截与 Job 所有权保持原状。测试 fixture 改用 `%~1` 识别已加引号参数，SDK 路径按目录身份比较。本机 Process 11项及 Git 11项测试、all-targets Clippy、格式检查通过；新增两个 Windows 条件测试等待远端执行。安装验证现同时执行完整核心 FFI 与 Git FFI，使用实际安装后的 DLL。
+
+最终安装包源码为 `66185753b079f642ae35051e5234c00886e7d396`，打包分支为 `codex/windows-package-20261021`。[Windows package #6](https://github.com/pillarxie/flutter_dev/actions/runs/39569902511) 全部通过：Windows Release、安装器与便携 ZIP、静默安装、安装后真实核心 FFI 与 Git FFI（2项通过）、进程存活10秒、卸载和产物上传。Artifacts 的 [FlutterDev-windows-x64-6](https://github.com/pillarxie/flutter_dev/actions/runs/39569902511/artifacts/12332032313) 保存至2026年11月20日。
+
+已下载产物至本机忽略目录 `build/windows/downloads/`，核对 GitHub 外层 ZIP 摘要、内部 SHA256SUMS，以及便携版 EXE、Rust/Flutter DLL、Visual C++ CRT 均为 x64 PE，Flutter data/assets 完整。安装器 `FlutterDev-0.1.0+1-windows-x64-setup.exe` 为12,669,057字节，SHA256 `373da832b937eee61c87526ebfdec66ddd2af29617c31debf6859a1cad9798e8`；便携 ZIP 为15,232,122字节，SHA256 `2080ec79181dcda2552009a5d4b1fb44795c863848276f22fa363c81d0bfcc62`。
+
+同源码的 [Desktop baseline](https://github.com/pillarxie/flutter_dev/actions/runs/39569902626) 中，Windows 的 Rust 78项、Flutter 192项通过/4项条件跳过，格式、严格 all-targets Clippy、分析和 Release 全部通过；新增真实 canonical 批处理与 shell 字符拒绝用例、实际 SDK/Git FFI 均通过。Linux 的 Rust 126项、Flutter 193项通过/3项条件跳过及 Release 全部通过。macOS 首次因未改动的 auto_reload 时序测试失败，已仅重跑该 job 一次，撰写时尚未完成，不将整套三平台 CI 记为通过。
+
+Windows 构建有第三方 WebView2 C4458 编译警告，Actions 有 Node 弃用提示，均未阻止成功产物。安装器未签名；未进行 Windows 人工界面/WebView2 交互、网络共享目录或用户业务工程真实 SDK 调试验收。源码快照通过临时 Git 索引提交，当前本地主分支及原有暂存区保持不变，构建产物不入库。
+
+## Windows 首窗、后台进程及用户目录修复
+
+2026年10月22日。版本更新为 `0.1.1+2`。Flutter 首个加载帧提交后才初始化原生核心，失败可重试，卸载后的迟到结果被忽略。Rust 的受控后台进程增加 `CREATE_NO_WINDOW`，保留创建挂起、Job 分配后恢复及独立编辑器路径；新增真实 exe、cmd/bat 后代的控制台 API 检查及进程树隔离测试。存活 SDK daemon 的设备/模拟器请求复用已有探测结果，并发首次请求合并创建，死 daemon 重探测；其他 SDK 的慢探测不阻塞存活 daemon 查询。添加项目后的排队 Git 刷新复用已在进行的请求。
+
+Windows WebView2 显式使用 `%LOCALAPPDATA%\flutter_dev\WebView2`，不在安装目录创建缓存；创建迟到及离页均释放环境，兼容锁定插件0.6.0的 dispose channel 问题。安装器继续使用 `PrivilegesRequired=lowest` 与当前用户默认目录。旧安装器与主程序的实际 manifest 均为 `asInvoker`；用户报告的交互 UAC 原因尚未复现，不能把静默安装或 manifest 检查等同于已定位该弹窗原因。
+
+本机 Rust Process 11项及 Device 5项通过，严格 all-targets Clippy、格式与 `git diff --check` 通过。Flutter 定向32项及完整 Dart analyze 通过。本机 Flutter 已为3.47.7，辅助测试中排除了4项原有 Git 菜单布局用例，它们触发该版本新增的 ListTile 断言；正式构建/回归使用固定 Flutter3.38.3，不改锁文件或升级项目依赖。新增 Flutter/测试 API 另对照官方3.38.3源码核实兼容。
+
+新增 `verify-windows-startup.ps1` 与 `verify-windows-install.ps1`，分别验证完全脱离控制台的父进程下的真实首窗/终端观察，以及临时标准用户令牌下不传 `/DIR` 的默认安装、目录写入、10秒存活和同用户卸载。前者使用 Job 与启动 gate 限制进程所有权；后者最终采用交互桌面中的显式 profile 加载/卸载与 Credential 普通用户进程，禁止 Session0 和管理员令牌代测。两种验证均输出 JSON，流水线只在验证成功后上传包；同运行源码缓存只复用安装包字节，每次仍重新验证。
+
+首轮新增 Windows 探针把 `GetConsoleProcessList=0` 当作无窗口的必要条件，导致2项测试失败。Windows Server2025 独立真实 exe 及 cmd/bat 后代证据显示，`GetConsoleWindow=0`、`IsWindowVisible=false` 时内部计数仍分别为1和2；现保留无窗口句柄/不可见断言，将进程计数仅作诊断，不改生产启动方案，也不放宽进程树所有权验证。
+
+源码 `7ac9a2bda9a8fcefa604f58c610536077393b6e8` 的 [Desktop baseline #10](https://github.com/pillarxie/flutter_dev/actions/runs/39744690108) 中，Windows 的 Rust84项、Flutter206项通过/4项跳过，格式、严格 all-targets Clippy、分析和 Release 全部通过。Linux 的 Rust129项、Flutter207项通过/3项跳过及 Release 全部通过。macOS 首轮及单独重跑一次仍在未修改的 `auto_reload/tests.rs:247` 失败（129通过、1失败），后续 Flutter 检查跳过；不能将整套三平台 CI 记为通过。
+
+同源码 [Windows package #8](https://github.com/pillarxie/flutter_dev/actions/runs/39744690088) 已完成 Release、安装器和便携 ZIP，安装后真实核心/Git FFI通过。在 Windows2022 的 Session2 中首窗1296ms，20秒终端观察为0，应用正常关闭。新临时普通用户的管理员组成员关系、管理员角色及令牌提升均为false，默认安装、安装/设置目录写入、应用存活10秒和同用户卸载全部通过，任务自然退出0；但控制器最终删除临时 profile 因系统仍持有文件失败，因此该运行整体失败、未上传安装包，仅上传诊断。后续正在修复验证器 profile 生命周期，不能将本次记录记为最终交付成功。
+
+Windows Server2025 的旧包验证同样通过普通用户产品检查，但三次计划任务路径的测试留下的临时 profile 仍被系统持有；第三次已显式释放控制器的 profile 引用，系统仍有额外引用，故停止此路径。对应账号、任务、进程、临时登录权限及 staging 已清理，未强制重启或停止系统服务。精确 SID/目录、只读事件及后续受保护清理脚本位于本机忽略目录 `build/windows/server-standard-user-validation/`。旧包窗口与探针证据仅验证验证器和平台行为，不代表新版缺陷已复现或所有功能已回归。Windows10/11 个人业务工程和 WebView2 人工交互未验收。
+
+最终 [Windows package #9](https://github.com/pillarxie/flutter_dev/actions/runs/39750180161) 全部通过，验证脚本源码为 `ac4b140dad77e93e5b1bf08e5a16ce84685ef778`。该运行按运行源码完整 hash 命中#8安装包缓存，未修改已编译的产品字节；重新执行27项 Flutter定向测试、Rust84项、实际安装后的核心/Git FFI2项、完整窗口和标准用户验证。完全脱离控制台的启动器计数为0，Windows2022 Session2 中首个工作台窗口1599ms，20秒新终端窗口0，应用正常关闭、Job/worker退出0且无清理错误。样例含实际 Flutter3.38.3 SDK 与 Git 项目，未运行个人业务项目。
+
+标准用户验证最终使用交互桌面中的 Credential 子进程，不额外隐式加载 profile：SID匹配，管理员角色/管理员组/TokenIsElevated全部false；真实默认安装、安装与设置目录写入、应用存活10秒和同用户卸载全部通过。worker退出0，所有本轮进程退出后显式卸载 profile，WMI确认已非Loaded并成功删除；环境与控制器权限恢复成功，cleanupErrors为空。计划任务路径的清理失败没有被忽略或降为通过。
+
+成功产物 [FlutterDev-windows-x64-9](https://github.com/pillarxie/flutter_dev/actions/runs/39750180161/artifacts/12413840691) 保存至2026年11月21日，已下载到 `build/windows/downloads/0.1.1+2/`。核验GitHub外层ZIP摘要、内部SHA256SUMS，以及完整Flutter assets、Rust/Flutter/CRT x64二进制；实际安装器和应用manifest均为asInvoker。安装器12,675,955字节，SHA256 `5cd6f8c004e89123b531ccbf374df8485d9b088944f499661a1c5b74e0010399`；便携ZIP15,242,614字节，SHA256 `a7227d2428c4ee4c2c7551ed822d4629b9b7cb80b9744bd5b8d0f1a04feac29c`。安装器仍未代码签名，不能将以上结果当作Windows10/11交互UAC原因已定位。
+
+同一便携ZIP另上传Windows Server2025，远端摘要匹配。使用专用Git样例、隔离设置/缓存以及Session2已登录但RDP断开的Interactive/Limited任务运行最终脚本：启动器控制台进程计数0，首个有客户区的runner窗口2453ms，随后20秒新终端窗口0；应用正常关闭，无强制终止，worker退出0且属于控制器Job，stderr和清理错误均为空。服务器没有安装Flutter SDK，因此此处覆盖工作台及Git项目恢复，不代表真实SDK调试或DevTools交互验收；不以不同缓存/机器上的旧包时间宣称性能提升比例。证据在本机 `build/windows/verification/remote-new/`。
+
+最终源码的 [Desktop baseline #11](https://github.com/pillarxie/flutter_dev/actions/runs/39750180328) 也已完成：Windows Rust84项、Flutter206项通过/4项跳过及Release成功；Linux Rust129项、Flutter207项通过/3项跳过及Release成功；macOS仍为同一既有自动热重载用例失败（129通过、1失败），未重复重跑。格式、严格Clippy、分析及两端实际FFI以对应成功job为准。
+
+服务器最终收尾：新/旧窗口验证任务已注销，两处带本轮marker的ProgramData测试目录已在证据归档并校验后删除，本轮窗口应用/探针进程残留为0。三个计划任务路径留下的临时profile最终复核仍Loaded=true，未强行卸载或修改其目录；对应本地账号与计划任务均不存在。后续受保护清理助手仅在精确SID/目录匹配且三个profile均已由系统正常释放时才允许WMI删除，尚未执行。最终记录位于 `build/windows/server-standard-user-validation/cleanup-status.json` 及 `build/windows/verification/remote-new/cleanup-result.json`。
+
+## 构建缓存清理
+
+2026年10月23日。“构建任务”新增“清除构建缓存”入口，确认后清理所有已导入项目及本次应用运行中构建任务关联项目的 `build` 目录，并清理实际生成且已记录的自定义产物。自定义产物归属通过设置文件旁的独立有界记录持久保存；近期任务仍只保留在本次运行内。构建参数指定的输出目录仅在任务新建或已登记归属时整体清理，构建前已存在的未归属目录只清理任务实际报告的文件或应用包；预设中仅用于打开位置的“产物目录”不作为删除依据。
+
+Rust 负责清理、路径校验与任务输出失效。存在活动运行、构建或测试时拒绝清理，与新任务启动共享操作锁；保留任务状态和日志，清理后禁用已失效的旧产物入口。符号链接、Windows junction、项目源码及其根目录、受保护祖先等拒绝删除；错误按路径汇报，成功项继续完成，失败记录保留供重试。记录满时明确报错，不静默淘汰尚未清理的产物。官方 2.12.0 生成器重新生成双端桥接。
+
+最终 Rust 全套146项及 doc tests 通过，格式检查、严格 all-targets Clippy 通过。用例覆盖多项目与持久自定义记录、预先存在的未归属目录、精确产物与多行输出、失败/取消构建记录、无产物预约释放、构建容量拒绝、源码和祖先路径保护、部分失败及重试、符号链接隔离、去重与记录容量限制。受限沙箱首轮因 localhost 监听被系统拒绝而失败的测试，已在自动审批允许的沙箱外完整重跑通过，未将环境失败计为通过或保留为源码基线问题。
+
+最终重新构建原生动态库后，使用 Flutter 3.38.3、`--no-pub`、显式 `FLUTTER_DEV_NATIVE_LIBRARY` 和两份全新专用临时 `FLUTTER_DEV_SETTINGS_PATH`，顺序执行新增构建清理与既有核心桥接 FFI 共2项，全部通过。新增检查创建含中文、空格及嵌套产物的可丢弃项目，验证活动构建拒绝删除、停止后两项目 `build` 清理、源码及未导入项目和普通打开目录保留、清后任务日志保留、重复清理幂等；Unix 活动构建使用测试拥有的假 SDK 和进程，不依赖真实 Flutter SDK。测试文件的新增活动构建场景随后定向静态分析无问题。
+
+最终 Flutter 3.38.3 全量 `flutter test --no-pub --reporter expanded` 213项通过、6项条件跳过；真实原生库参数未设置时 FFI 条件跳过，清理与既有核心 FFI 已按上段另行实际执行通过。全量 `flutter analyze --no-pub` 无问题。界面回归覆盖确认与取消、加载和重复点击、部分错误/重试、清理后刷新和旧产物入口禁用、离开页面后的迟到结果、深浅色及560px窄窗口，并验证清理前发起的后台任务列表不能在清理后迟到覆盖新结果。修改文件格式及 `git diff --check` 通过。
+
+本次未操作用户业务项目、个人设置或已运行的工作台；未执行真实 SDK 样例打包，Windows / Linux 清理功能尚未实机验证。上述跨平台路径条件测试及本机 FFI 结果不能替代其他宿主的文件系统与人工交互验收。
+
+## 构建预设按项目隔离
+
+2026年10月23日。构建预设改为由 Rust 按项目路径读取、校验和保存；当前项目新增、编辑、删除或清空预设不会影响其他项目，重启后保留。项目可以分别保存相同 ID 的预设；尚未保存自定义预设的新项目使用内置默认，显式清空则保留空列表。旧全局预设分别迁移到原设置中已导入的项目，已存在的项目独立配置优先；以后新导入的项目不继承旧全局预设。旧配置有预设但没有已导入项目时，在首次写回前将原设置独立归档为同目录的 `settings.legacy-global-presets.json`，避免丢失无法确定项目归属的旧预设。
+
+项目范围的读写继续使用既有设置串行锁与原子落盘。Flutter 构建窗口根据当前项目加载和保存预设，并保留加载失败重试、保存失败反馈及异步迟到结果保护；官方 flutter_rust_bridge 2.12.0 生成器已重新生成两端桥接。README 与使用说明同步项目归属和迁移规则，原有构建缓存清理能力及文档保留。
+
+最终 Rust 全套150项及 doc tests、格式检查和严格 all-targets Clippy 通过。覆盖两项目独立保存和清空、同 ID 不冲突、旧全局迁移、已有项目配置优先、新项目默认、无归属旧预设备份，以及其他设置保存不覆盖项目预设。
+
+最终重新构建原生动态库后，使用 Flutter 3.38.3、`--no-pub`、显式绝对原生库路径和两份全新专用临时 `FLUTTER_DEV_SETTINGS_PATH`，顺序执行核心桥接及构建缓存实际 FFI 共2项，全部通过。核心用例验证两个项目分别保存同 ID 预设、清空其中一个后另一项目保持原值、主题与工作区保存互相保留预设、核心关闭后重新读取仍保留项目配置。缓存用例同时验证清理后当前项目预设保留且不出现在另一项目中，原有活动构建拦截及源码、普通目录保留场景继续通过。测试使用可丢弃项目和测试拥有的假 SDK、进程，专用临时设置已清理，没有操作个人设置。
+
+最终冻结文件后完整 `flutter test --no-pub --reporter expanded` 221项通过、6项条件跳过；未传原生库参数的条件跳过不算实际 FFI 通过，前述2项已单独执行。全量 `flutter analyze --no-pub` 无问题，修改文件格式及 `git diff --check` 通过，本轮没有修改依赖锁文件。界面回归覆盖按项目读写、独立增改删、加载与保存失败重试、项目切换后的迟到结果，以及既有浅深色与560px窄窗口场景。
+
+本次未重新验证真实 SDK 打包；构建进程通过测试拥有的 SDK fixture 验证。Windows / Linux 本轮未实机验证，本机通过的项目设置和 FFI 检查不能替代其他宿主验收。
+
+## 侧边栏默认折叠与紧凑间距（2026年10月23日）
+
+恢复的项目、新导入的项目和后台会话带来的项目默认收起历史会话；点击箭头展开，项目切换保留本次窗口内的手动展开状态。主动启动成功仍展开对应项目并选中新会话；迟到启动和后台事件保留当前选择与折叠状态。折叠列表不会停止或取消选择正在查看的会话。
+
+缩小侧栏标题与分组留白、项目行和会话行的上下内边距，项目分组间距从14px调整为4px，保留既有主题、分支省略和路径提示。
+
+本轮使用 Flutter 3.38.3：静态检查通过；53项既有工作台、主题、项目恢复及效率功能测试通过，5项侧栏组件测试通过。覆盖浅色/深色、1400px/560px、恢复/导入项目默认折叠、手动展开、会话选择及后台更新。另复用既有系统字体预览方式通过2项临时渲染测试，生成并检查折叠/展开及560×500窄窗效果；截图仅保存在本次本机临时目录，不作为真实 SDK 运行证据。`git diff --check` 通过。
+
+本轮未修改 Rust 或桥接 API，未执行原生 FFI、真实 SDK 集成、桌面 release 构建或 Windows/Linux 实机验证。首次误用本机默认 Flutter 3.47.7，产生额外 ListTile 断言；已切回项目基线重新验证，撤回新版工具自动产生的锁文件和分析配置改动。
+
+## macOS 最新工作区版本安装（2026年10月26日）
+
+按用户授权，使用 Flutter 3.38.3 / Dart 3.10.1、Rust 1.95.0 和 Xcode 26.0，对当前工作区执行 `flutter build macos --release`，构建成功，产物约67.0MB，应用版本为0.1.1+2。构建有第三方 `flutter_inappwebview_macos` 的未使用变量和弃用 API 警告，未阻止构建。
+
+旧版原从项目 Release 构建目录运行，安装前已正常退出。完整应用包安装至系统 Applications 目录；复制后核对全部70个文件和符号链接一致，安装前后 `codesign --verify --deep --strict` 均通过，该检查仅代表本机签名完整性，不代表发行签名或公证完成。从安装路径启动后，原生界面树确认进入工作台、Rust 核心加载成功，已有项目列表和 SDK 设置恢复；进程路径确认为系统安装目录中的应用。
+
+验收后注销并删除本项目 Debug 开发版及 Release 构建目录的应用副本，保留系统目录中的0.1.1+2。保留应用设置、项目数据、源码和其他构建缓存。本次验证范围为 macOS 构建、安装完整性及工作台启动，没有重新执行全量 Rust/Flutter 测试、真实 SDK 会话或 Windows/Linux 实机验收。

@@ -5,6 +5,7 @@
 
 import 'api/core.dart';
 import 'build.dart';
+import 'build_cache.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
@@ -14,9 +15,12 @@ import 'frb_generated.dart';
 import 'log.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated_io.dart';
 import 'project.dart';
+import 'project_git.dart';
 import 'sdk.dart';
 import 'session.dart';
 import 'settings.dart';
+import 'test_runner.dart';
+import 'workspace.dart';
 
 abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RustLibApiImplPlatform({
@@ -51,10 +55,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BuildConfiguration dco_decode_box_autoadd_build_configuration(dynamic raw);
 
   @protected
+  BuildVersion dco_decode_box_autoadd_build_version(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_i_32(dynamic raw);
 
   @protected
+  ProjectGitInfo dco_decode_box_autoadd_project_git_info(dynamic raw);
+
+  @protected
   RunConfiguration dco_decode_box_autoadd_run_configuration(dynamic raw);
+
+  @protected
+  RunProfile dco_decode_box_autoadd_run_profile(dynamic raw);
+
+  @protected
+  TestRunConfig dco_decode_box_autoadd_test_run_config(dynamic raw);
+
+  @protected
+  WorkspacePreferences dco_decode_box_autoadd_workspace_preferences(
+    dynamic raw,
+  );
+
+  @protected
+  BuildCacheCleanupResult dco_decode_build_cache_cleanup_result(dynamic raw);
 
   @protected
   BuildConfiguration dco_decode_build_configuration(dynamic raw);
@@ -64,6 +88,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BuildSnapshot dco_decode_build_snapshot(dynamic raw);
+
+  @protected
+  BuildVersion dco_decode_build_version(dynamic raw);
 
   @protected
   CoreEvent dco_decode_core_event(dynamic raw);
@@ -105,6 +132,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<BuildPreset> dco_decode_list_build_preset(dynamic raw);
 
   @protected
+  List<BuildSnapshot> dco_decode_list_build_snapshot(dynamic raw);
+
+  @protected
   List<DebugThread> dco_decode_list_debug_thread(dynamic raw);
 
   @protected
@@ -123,13 +153,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<ProjectBuildPresets> dco_decode_list_project_build_presets(dynamic raw);
+
+  @protected
   List<ProjectInfo> dco_decode_list_project_info(dynamic raw);
+
+  @protected
+  List<ProjectRunState> dco_decode_list_project_run_state(dynamic raw);
+
+  @protected
+  List<RunProfile> dco_decode_list_run_profile(dynamic raw);
 
   @protected
   List<SessionSnapshot> dco_decode_list_session_snapshot(dynamic raw);
 
   @protected
   List<SourceBreakpoint> dco_decode_list_source_breakpoint(dynamic raw);
+
+  @protected
+  List<TestResult> dco_decode_list_test_result(dynamic raw);
+
+  @protected
+  List<TestRunSnapshot> dco_decode_list_test_run_snapshot(dynamic raw);
+
+  @protected
+  List<TestSelection> dco_decode_list_test_selection(dynamic raw);
 
   @protected
   LogEntry dco_decode_log_entry(dynamic raw);
@@ -147,16 +195,37 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  BuildVersion? dco_decode_opt_box_autoadd_build_version(dynamic raw);
+
+  @protected
   int? dco_decode_opt_box_autoadd_i_32(dynamic raw);
 
   @protected
+  ProjectGitInfo? dco_decode_opt_box_autoadd_project_git_info(dynamic raw);
+
+  @protected
+  RunProfile? dco_decode_opt_box_autoadd_run_profile(dynamic raw);
+
+  @protected
+  ProjectBuildPresets dco_decode_project_build_presets(dynamic raw);
+
+  @protected
+  ProjectGitInfo dco_decode_project_git_info(dynamic raw);
+
+  @protected
   ProjectInfo dco_decode_project_info(dynamic raw);
+
+  @protected
+  ProjectRunState dco_decode_project_run_state(dynamic raw);
 
   @protected
   RunConfiguration dco_decode_run_configuration(dynamic raw);
 
   @protected
   RunMode dco_decode_run_mode(dynamic raw);
+
+  @protected
+  RunProfile dco_decode_run_profile(dynamic raw);
 
   @protected
   SdkInfo dco_decode_sdk_info(dynamic raw);
@@ -174,6 +243,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SourcePage dco_decode_source_page(dynamic raw);
 
   @protected
+  TestResult dco_decode_test_result(dynamic raw);
+
+  @protected
+  TestRunConfig dco_decode_test_run_config(dynamic raw);
+
+  @protected
+  TestRunSnapshot dco_decode_test_run_snapshot(dynamic raw);
+
+  @protected
+  TestSelection dco_decode_test_selection(dynamic raw);
+
+  @protected
   int dco_decode_u_32(dynamic raw);
 
   @protected
@@ -184,6 +265,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  WorkspacePreferences dco_decode_workspace_preferences(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -214,10 +298,38 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  BuildVersion sse_decode_box_autoadd_build_version(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
+  ProjectGitInfo sse_decode_box_autoadd_project_git_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RunConfiguration sse_decode_box_autoadd_run_configuration(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RunProfile sse_decode_box_autoadd_run_profile(SseDeserializer deserializer);
+
+  @protected
+  TestRunConfig sse_decode_box_autoadd_test_run_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WorkspacePreferences sse_decode_box_autoadd_workspace_preferences(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BuildCacheCleanupResult sse_decode_build_cache_cleanup_result(
     SseDeserializer deserializer,
   );
 
@@ -231,6 +343,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BuildSnapshot sse_decode_build_snapshot(SseDeserializer deserializer);
+
+  @protected
+  BuildVersion sse_decode_build_version(SseDeserializer deserializer);
 
   @protected
   CoreEvent sse_decode_core_event(SseDeserializer deserializer);
@@ -272,6 +387,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<BuildPreset> sse_decode_list_build_preset(SseDeserializer deserializer);
 
   @protected
+  List<BuildSnapshot> sse_decode_list_build_snapshot(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<DebugThread> sse_decode_list_debug_thread(SseDeserializer deserializer);
 
   @protected
@@ -292,7 +412,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<ProjectBuildPresets> sse_decode_list_project_build_presets(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<ProjectInfo> sse_decode_list_project_info(SseDeserializer deserializer);
+
+  @protected
+  List<ProjectRunState> sse_decode_list_project_run_state(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<RunProfile> sse_decode_list_run_profile(SseDeserializer deserializer);
 
   @protected
   List<SessionSnapshot> sse_decode_list_session_snapshot(
@@ -301,6 +434,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<SourceBreakpoint> sse_decode_list_source_breakpoint(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<TestResult> sse_decode_list_test_result(SseDeserializer deserializer);
+
+  @protected
+  List<TestRunSnapshot> sse_decode_list_test_run_snapshot(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<TestSelection> sse_decode_list_test_selection(
     SseDeserializer deserializer,
   );
 
@@ -320,16 +466,45 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  BuildVersion? sse_decode_opt_box_autoadd_build_version(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int? sse_decode_opt_box_autoadd_i_32(SseDeserializer deserializer);
 
   @protected
+  ProjectGitInfo? sse_decode_opt_box_autoadd_project_git_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RunProfile? sse_decode_opt_box_autoadd_run_profile(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProjectBuildPresets sse_decode_project_build_presets(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProjectGitInfo sse_decode_project_git_info(SseDeserializer deserializer);
+
+  @protected
   ProjectInfo sse_decode_project_info(SseDeserializer deserializer);
+
+  @protected
+  ProjectRunState sse_decode_project_run_state(SseDeserializer deserializer);
 
   @protected
   RunConfiguration sse_decode_run_configuration(SseDeserializer deserializer);
 
   @protected
   RunMode sse_decode_run_mode(SseDeserializer deserializer);
+
+  @protected
+  RunProfile sse_decode_run_profile(SseDeserializer deserializer);
 
   @protected
   SdkInfo sse_decode_sdk_info(SseDeserializer deserializer);
@@ -347,6 +522,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SourcePage sse_decode_source_page(SseDeserializer deserializer);
 
   @protected
+  TestResult sse_decode_test_result(SseDeserializer deserializer);
+
+  @protected
+  TestRunConfig sse_decode_test_run_config(SseDeserializer deserializer);
+
+  @protected
+  TestRunSnapshot sse_decode_test_run_snapshot(SseDeserializer deserializer);
+
+  @protected
+  TestSelection sse_decode_test_selection(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
@@ -357,6 +544,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  WorkspacePreferences sse_decode_workspace_preferences(
+    SseDeserializer deserializer,
+  );
 
   @protected
   void sse_encode_AnyhowException(
@@ -392,11 +584,47 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_build_version(
+    BuildVersion self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_project_git_info(
+    ProjectGitInfo self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_box_autoadd_run_configuration(
     RunConfiguration self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_run_profile(
+    RunProfile self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_test_run_config(
+    TestRunConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_workspace_preferences(
+    WorkspacePreferences self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_build_cache_cleanup_result(
+    BuildCacheCleanupResult self,
     SseSerializer serializer,
   );
 
@@ -411,6 +639,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_build_snapshot(BuildSnapshot self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_build_version(BuildVersion self, SseSerializer serializer);
 
   @protected
   void sse_encode_core_event(CoreEvent self, SseSerializer serializer);
@@ -455,6 +686,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_build_snapshot(
+    List<BuildSnapshot> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_debug_thread(
     List<DebugThread> self,
     SseSerializer serializer,
@@ -485,8 +722,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_project_build_presets(
+    List<ProjectBuildPresets> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_project_info(
     List<ProjectInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_project_run_state(
+    List<ProjectRunState> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_run_profile(
+    List<RunProfile> self,
     SseSerializer serializer,
   );
 
@@ -499,6 +754,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_source_breakpoint(
     List<SourceBreakpoint> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_test_result(
+    List<TestResult> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_test_run_snapshot(
+    List<TestRunSnapshot> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_test_selection(
+    List<TestSelection> self,
     SseSerializer serializer,
   );
 
@@ -518,10 +791,46 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_build_version(
+    BuildVersion? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_i_32(int? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_project_git_info(
+    ProjectGitInfo? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_run_profile(
+    RunProfile? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_project_build_presets(
+    ProjectBuildPresets self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_project_git_info(
+    ProjectGitInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_project_info(ProjectInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_project_run_state(
+    ProjectRunState self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_run_configuration(
@@ -531,6 +840,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_run_mode(RunMode self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_run_profile(RunProfile self, SseSerializer serializer);
 
   @protected
   void sse_encode_sdk_info(SdkInfo self, SseSerializer serializer);
@@ -554,6 +866,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_source_page(SourcePage self, SseSerializer serializer);
 
   @protected
+  void sse_encode_test_result(TestResult self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_test_run_config(TestRunConfig self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_test_run_snapshot(
+    TestRunSnapshot self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_test_selection(TestSelection self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
@@ -564,6 +891,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_workspace_preferences(
+    WorkspacePreferences self,
+    SseSerializer serializer,
+  );
 }
 
 // Section: wire_class

@@ -2,8 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+import 'windows_webview_data.dart';
 
 /// One ordinary platform view, disposed with the selected DevTools tab.
 class EmbeddedDevToolsView extends StatefulWidget {
@@ -11,9 +14,12 @@ class EmbeddedDevToolsView extends StatefulWidget {
     super.key,
     required this.url,
     required this.onError,
+    this.windowsUserDataFolder,
   });
   final String url;
   final ValueChanged<String> onError;
+  @visibleForTesting
+  final Future<String> Function()? windowsUserDataFolder;
 
   @override
   State<EmbeddedDevToolsView> createState() => _EmbeddedDevToolsViewState();
@@ -25,6 +31,7 @@ class _EmbeddedDevToolsViewState extends State<EmbeddedDevToolsView> {
   int _navigation = 0, _progress = 0;
   bool _loading = true;
   bool _windowsReady = false;
+  WebViewEnvironment? _windowsEnvironment;
 
   bool get _supported =>
       !kIsWeb &&
@@ -58,9 +65,51 @@ class _EmbeddedDevToolsViewState extends State<EmbeddedDevToolsView> {
         );
         return;
       }
-      setState(() => _windowsReady = true);
+      final folder =
+          await (widget.windowsUserDataFolder ??
+              windowsWebViewUserDataFolder)();
+      if (!mounted) return;
+      final environment = await WebViewEnvironment.create(
+        settings: WebViewEnvironmentSettings(userDataFolder: folder),
+      );
+      if (!mounted) {
+        await _disposeWindowsEnvironment(environment);
+        return;
+      }
+      setState(() {
+        _windowsEnvironment = environment;
+        _windowsReady = true;
+      });
     } catch (e) {
       if (mounted) widget.onError('WebView2 初始化失败：$e');
+    }
+  }
+
+  Future<void> _disposeWindowsEnvironment(
+    WebViewEnvironment environment,
+  ) async {
+    try {
+      try {
+        await environment.dispose();
+      } on MissingPluginException {
+        // flutter_inappwebview_windows 0.6.0 assigns the static factory's ID to
+        // the Dart disposal channel. Native environments use their own ID.
+        MethodChannel(
+          'com.pichillilorenzo/flutter_webview_environment_${PlatformWebViewEnvironment.static().id}',
+        ).setMethodCallHandler(null);
+        await MethodChannel(
+          'com.pichillilorenzo/flutter_webview_environment_${environment.id}',
+        ).invokeMethod<void>('dispose');
+      }
+    } catch (error, stack) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'Flutter Dev',
+          context: ErrorDescription('while disposing a WebView2 environment'),
+        ),
+      );
     }
   }
 
@@ -139,6 +188,7 @@ class _EmbeddedDevToolsViewState extends State<EmbeddedDevToolsView> {
       children: [
         Positioned.fill(
           child: InAppWebView(
+            webViewEnvironment: _windowsEnvironment,
             initialUrlRequest: URLRequest(url: WebUri(_initialUrl)),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
@@ -219,6 +269,9 @@ class _EmbeddedDevToolsViewState extends State<EmbeddedDevToolsView> {
     _navigation++;
     _controller = null;
     // No keepAlive token: removing InAppWebView disposes its native platform view.
+    final environment = _windowsEnvironment;
+    _windowsEnvironment = null;
+    if (environment != null) unawaited(_disposeWindowsEnvironment(environment));
     super.dispose();
   }
 }

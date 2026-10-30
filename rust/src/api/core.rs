@@ -1,14 +1,18 @@
-pub use crate::build::{BuildConfiguration, BuildPreset, BuildSnapshot};
+pub use crate::build::{BuildConfiguration, BuildPreset, BuildSnapshot, BuildVersion};
+pub use crate::build_cache::BuildCacheCleanupResult;
 pub use crate::device::{DeviceInfo, EmulatorInfo};
 pub use crate::devtools::DevToolsPage;
 pub use crate::log::{LogEntry, LogPage};
 pub use crate::project::ProjectInfo;
+pub use crate::project_git::ProjectGitInfo;
 pub use crate::sdk::SdkInfo;
 pub use crate::session::{
     CoreEvent, CoreEventKind, DebugAction, DebugThread, EnvVar, JsonResponse, RunConfiguration,
     RunMode, SessionSnapshot, SessionState, SourceBreakpoint,
 };
-pub use crate::settings::AppSettings;
+pub use crate::settings::{AppSettings, ProjectBuildPresets};
+pub use crate::test_runner::{TestResult, TestRunConfig, TestRunSnapshot, TestSelection};
+pub use crate::workspace::{ProjectRunState, RunProfile, WorkspacePreferences};
 use crate::{device::DeviceManager, session::Session};
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
@@ -21,11 +25,14 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 struct Core {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     builds: crate::build::BuildManager,
+    tests: crate::test_runner::TestManager,
+    workspace_updates: Mutex<()>,
+    artifact_operations: RwLock<()>,
     devices: DeviceManager,
     devtools: crate::devtools::DevToolsManager,
     events: broadcast::Sender<CoreEvent>,
@@ -40,6 +47,9 @@ fn core() -> Arc<Core> {
         let core = Arc::new(Core {
             sessions: Mutex::new(HashMap::new()),
             builds: crate::build::BuildManager::default(),
+            tests: crate::test_runner::TestManager::default(),
+            workspace_updates: Mutex::new(()),
+            artifact_operations: RwLock::new(()),
             devices: DeviceManager::new(events.clone()),
             devtools: crate::devtools::DevToolsManager::default(),
             events,
@@ -172,6 +182,12 @@ async fn session(id: &str) -> Result<Arc<Session>> {
 pub async fn discover_projects(root: String) -> Result<Vec<ProjectInfo>> {
     crate::project::discover_projects(root).await
 }
+pub async fn project_git_info(project_path: String) -> Result<Option<ProjectGitInfo>> {
+    crate::project_git::project_git_info(project_path).await
+}
+pub async fn switch_project_branch(project_path: String, branch: String) -> Result<ProjectGitInfo> {
+    crate::project_git::switch_project_branch(project_path, branch).await
+}
 pub async fn resolve_sdk(
     project_path: Option<String>,
     explicit_path: Option<String>,
@@ -187,8 +203,14 @@ pub async fn set_default_sdk(path: Option<String>) -> Result<AppSettings> {
 pub async fn set_theme_mode(mode: String) -> Result<AppSettings> {
     crate::settings::set_theme_mode(mode).await
 }
-pub async fn set_build_presets(presets: Vec<BuildPreset>) -> Result<AppSettings> {
-    crate::settings::set_build_presets(presets).await
+pub async fn get_build_presets(project_path: String) -> Result<Vec<BuildPreset>> {
+    crate::settings::get_build_presets(project_path).await
+}
+pub async fn set_build_presets(
+    project_path: String,
+    presets: Vec<BuildPreset>,
+) -> Result<Vec<BuildPreset>> {
+    crate::settings::set_build_presets(project_path, presets).await
 }
 pub async fn set_workspace_projects(
     projects: Vec<ProjectInfo>,
@@ -196,11 +218,118 @@ pub async fn set_workspace_projects(
 ) -> Result<AppSettings> {
     crate::settings::set_workspace_projects(projects, selected_project_path).await
 }
+pub async fn set_workspace_preferences(preferences: WorkspacePreferences) -> Result<AppSettings> {
+    let core = core();
+    let _update = core.workspace_updates.lock().await;
+    let settings = crate::settings::set_workspace_preferences(preferences).await?;
+    let sessions: Vec<_> = core.sessions.lock().await.values().cloned().collect();
+    for session in sessions {
+        let path = session.snapshot.lock().await.project_path.clone();
+        let enabled = settings
+            .workspace_preferences
+            .project_states
+            .iter()
+            .any(|state| state.project_path == path && state.auto_reload);
+        session.set_auto_reload(enabled);
+    }
+    Ok(settings)
+}
+pub async fn open_source_location(
+    project_path: String,
+    path: String,
+    line: u32,
+    column: u32,
+) -> Result<()> {
+    crate::workspace::open_source_location(project_path, path, line, column).await
+}
+pub async fn discover_test_files(project_path: String) -> Result<Vec<String>> {
+    crate::test_runner::discover_test_files(project_path).await
+}
+pub async fn start_test_run(config: TestRunConfig) -> Result<TestRunSnapshot> {
+    let core = core();
+    let _operation = core.artifact_operations.read().await;
+    core.tests.start(config).await
+}
+pub async fn test_run_snapshot(run_id: String) -> Result<TestRunSnapshot> {
+    core().tests.snapshot(&run_id).await
+}
+pub async fn list_test_runs() -> Vec<TestRunSnapshot> {
+    core().tests.list().await
+}
+pub async fn read_test_logs(run_id: String, after_id: u64, limit: u32) -> Result<LogPage> {
+    core().tests.logs(&run_id, after_id, limit).await
+}
+pub async fn stop_test_run(run_id: String) -> Result<()> {
+    core().tests.stop(&run_id).await
+}
 pub async fn start_build(config: BuildConfiguration) -> Result<BuildSnapshot> {
-    core().builds.start(config).await
+    let core = core();
+    let _operation = core.artifact_operations.read().await;
+    core.builds
+        .start_with_registry(config, Some(crate::build_cache::registry_path()?))
+        .await
+}
+pub async fn clear_build_cache() -> Result<BuildCacheCleanupResult> {
+    let core = core();
+    let projects = crate::settings::get_app_settings()
+        .await?
+        .projects
+        .into_iter()
+        .map(|project| std::path::PathBuf::from(project.path))
+        .collect();
+    clear_build_cache_for(&core, crate::build_cache::registry_path()?, projects).await
+}
+
+async fn clear_build_cache_for(
+    core: &Core,
+    registry: std::path::PathBuf,
+    mut projects: Vec<std::path::PathBuf>,
+) -> Result<BuildCacheCleanupResult> {
+    let _operation = core.artifact_operations.write().await;
+    let builds = core.builds.list().await;
+    let tests = core.tests.list().await;
+    let sessions: Vec<_> = core.sessions.lock().await.values().cloned().collect();
+    anyhow::ensure!(
+        builds
+            .iter()
+            .all(|build| matches!(build.state.as_str(), "succeeded" | "failed" | "cancelled")),
+        "Stop all build tasks before clearing build cache"
+    );
+    anyhow::ensure!(
+        tests
+            .iter()
+            .all(|run| matches!(run.state.as_str(), "succeeded" | "failed" | "cancelled")),
+        "Stop all test tasks before clearing build cache"
+    );
+    projects.extend(
+        builds
+            .into_iter()
+            .map(|build| std::path::PathBuf::from(build.project_path)),
+    );
+    for session in sessions {
+        let snapshot = session.snapshot.lock().await;
+        anyhow::ensure!(
+            matches!(snapshot.state, SessionState::Ended | SessionState::Failed),
+            "Stop all run sessions before clearing build cache"
+        );
+        drop(snapshot);
+        // Terminal state can be published before its owned DAP process is reaped.
+        // This only waits for terminal cleanup; active sessions are rejected above.
+        session.stop().await?;
+    }
+    let result = crate::build_cache::clear(registry, projects).await?;
+    core.builds.invalidate_outputs(&result.deleted_paths).await;
+    Ok(result)
+}
+
+pub async fn read_build_version(project_path: String, args: Vec<String>) -> Result<BuildVersion> {
+    crate::build::read_build_version(project_path, args).await
 }
 pub async fn build_snapshot(build_id: String) -> Result<BuildSnapshot> {
     core().builds.snapshot(&build_id).await
+}
+pub async fn list_builds() -> Vec<BuildSnapshot> {
+    core().builds.list().await
 }
 pub async fn read_build_logs(build_id: String, after_id: u64, limit: u32) -> Result<LogPage> {
     core().builds.logs(&build_id, after_id, limit).await
@@ -230,6 +359,35 @@ pub async fn start_session(config: RunConfiguration) -> Result<SessionSnapshot> 
         bail!("Invalid environment variable");
     }
     let core = core();
+    let _operation = core.artifact_operations.read().await;
+    // iOS SDK log readers identify apps by executable name (often Runner).
+    // Resolve the target platform from the selected SDK, never from its ID.
+    let isolate_device_logs = core
+        .devices
+        .devices(&config.sdk_path)
+        .await
+        .map_err(|error| anyhow!("SDK device discovery failed: {error}"))
+        .and_then(|devices| {
+            devices
+                .iter()
+                .find(|device| device.id == config.device_id)
+                .map(|device| {
+                    device.platform_type.as_deref() == Some("ios")
+                        || device.platform.starts_with("ios")
+                })
+                .ok_or_else(|| anyhow!("Selected SDK device is no longer available"))
+        });
+    let update = core.workspace_updates.lock().await;
+    let auto_reload = crate::settings::get_app_settings()
+        .await
+        .map(|settings| {
+            settings
+                .workspace_preferences
+                .project_states
+                .iter()
+                .any(|state| state.project_path == config.project_path && state.auto_reload)
+        })
+        .unwrap_or(false);
     let mut sessions = core.sessions.lock().await;
     // Retain only a small recent history; each session has its own bounded logs.
     if sessions.len() >= 32 {
@@ -254,9 +412,12 @@ pub async fn start_session(config: RunConfiguration) -> Result<SessionSnapshot> 
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
         core.ids.fetch_add(1, Ordering::Relaxed)
     );
-    let session = Session::new(id.clone(), config, core.events.clone());
+    let session = Session::new(id.clone(), config, core.events.clone(), isolate_device_logs);
+    session.set_auto_reload(auto_reload);
+    crate::auto_reload::start(session.clone());
     sessions.insert(id, session.clone());
     drop(sessions);
+    drop(update);
     session.emit(CoreEventKind::State, None).await;
     let snapshot = session.snapshot.lock().await.clone();
     let runner = session.clone();
@@ -571,6 +732,7 @@ pub async fn shutdown_core() -> Result<()> {
     cancel_event_subscription().await?;
     let core = core();
     core.builds.shutdown().await;
+    core.tests.shutdown().await;
     let sessions: Vec<_> = core.sessions.lock().await.values().cloned().collect();
     for session in sessions {
         let _ = session.stop().await;
@@ -585,7 +747,7 @@ pub async fn shutdown_core() -> Result<()> {
 mod network_tests {
     use super::*;
 
-    fn configuration() -> RunConfiguration {
+    pub(super) fn configuration() -> RunConfiguration {
         RunConfiguration {
             project_path: String::new(),
             sdk_path: String::new(),
@@ -641,7 +803,12 @@ mod network_tests {
     #[tokio::test]
     async fn requires_active_debugging_and_connected_vm_service() {
         let (events, _) = broadcast::channel(10);
-        let session = Session::new("network-validation".into(), configuration(), events);
+        let session = Session::new(
+            "network-validation".into(),
+            configuration(),
+            events,
+            Ok(false),
+        );
         let mut snapshot = session.snapshot.lock().await.clone();
         snapshot.state = SessionState::Running;
         assert!(validate_network_session(&snapshot)
@@ -693,7 +860,7 @@ mod network_tests {
         config.sdk_path = sdk.path().to_string_lossy().into_owned();
         config.project_path = config.sdk_path.clone();
         let (events, _) = broadcast::channel(100);
-        let session = Session::new("network-forward".into(), config, events);
+        let session = Session::new("network-forward".into(), config, events, Ok(false));
         let runner = session.clone();
         let task = tokio::spawn(async move { runner.run().await });
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -728,5 +895,135 @@ mod network_tests {
             .find(|request| request["command"] == "callService")
             .unwrap();
         assert_eq!(call["arguments"], arguments);
+    }
+}
+
+#[cfg(test)]
+mod build_cache_tests {
+    use super::*;
+
+    fn isolated_core() -> Arc<Core> {
+        let (events, _) = broadcast::channel(32);
+        let (subscriptions, _) = watch::channel(0);
+        Arc::new(Core {
+            sessions: Mutex::new(HashMap::new()),
+            builds: Default::default(),
+            tests: Default::default(),
+            workspace_updates: Mutex::new(()),
+            artifact_operations: RwLock::new(()),
+            devices: DeviceManager::new(events.clone()),
+            devtools: Default::default(),
+            events,
+            ids: AtomicU64::new(1),
+            subscriptions,
+        })
+    }
+
+    #[tokio::test]
+    async fn cleanup_rejects_every_active_session_state_without_deleting() {
+        let fixture = tempfile::tempdir().unwrap();
+        let project = fixture.path().canonicalize().unwrap();
+        std::fs::create_dir(project.join("build")).unwrap();
+        let core = isolated_core();
+        let session = Session::new(
+            "fixture".into(),
+            super::network_tests::configuration(),
+            core.events.clone(),
+            Ok(false),
+        );
+        core.sessions
+            .lock()
+            .await
+            .insert("fixture".into(), session.clone());
+        for state in [
+            SessionState::Preparing,
+            SessionState::Starting,
+            SessionState::Running,
+            SessionState::Paused,
+            SessionState::Stopping,
+        ] {
+            session.snapshot.lock().await.state = state;
+            let error =
+                clear_build_cache_for(&core, project.join("registry.json"), vec![project.clone()])
+                    .await
+                    .unwrap_err();
+            assert!(error.to_string().contains("Stop all run sessions"));
+            assert!(project.join("build").exists());
+        }
+        session.snapshot.lock().await.state = SessionState::Ended;
+        let result =
+            clear_build_cache_for(&core, project.join("registry.json"), vec![project.clone()])
+                .await
+                .unwrap();
+        assert!(result.errors.is_empty());
+        assert!(!project.join("build").exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_rejects_active_build_and_test_tasks_without_deleting() {
+        let fixture = tempfile::tempdir().unwrap();
+        let project = fixture.path().canonicalize().unwrap();
+        std::fs::write(project.join("pubspec.yaml"), "name: fixture").unwrap();
+        std::fs::create_dir(project.join("build")).unwrap();
+        let core = isolated_core();
+        let config = BuildConfiguration {
+            project_path: project.to_string_lossy().into_owned(),
+            sdk_path: Some(project.join("missing-sdk").to_string_lossy().into_owned()),
+            target: "apk".into(),
+            args: vec![],
+            output_directory: None,
+        };
+        core.builds.start(config).await.unwrap();
+        let error =
+            clear_build_cache_for(&core, project.join("registry.json"), vec![project.clone()])
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("Stop all build tasks"));
+        assert!(project.join("build").exists());
+        core.builds.shutdown().await;
+        core.tests
+            .start(TestRunConfig {
+                project_path: project.to_string_lossy().into_owned(),
+                sdk_path: Some(project.join("missing-sdk").to_string_lossy().into_owned()),
+                selections: vec![],
+            })
+            .await
+            .unwrap();
+        let error =
+            clear_build_cache_for(&core, project.join("registry.json"), vec![project.clone()])
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("Stop all test tasks"));
+        assert!(project.join("build").exists());
+        core.tests.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cleanup_waits_for_task_admission_and_blocks_new_admissions() {
+        let fixture = tempfile::tempdir().unwrap();
+        let project = fixture.path().canonicalize().unwrap();
+        std::fs::create_dir(project.join("build")).unwrap();
+        let core = isolated_core();
+        // This is the same guard held by all three public start APIs.
+        let admission = core.artifact_operations.read().await;
+        let cleanup_core = core.clone();
+        let cleanup_project = project.clone();
+        let cleanup = tokio::spawn(async move {
+            clear_build_cache_for(
+                &cleanup_core,
+                cleanup_project.join("registry.json"),
+                vec![cleanup_project],
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!cleanup.is_finished());
+        // Once a cleanup writer is queued, even new readers wait behind it.
+        assert!(core.artifact_operations.try_read().is_err());
+        assert!(project.join("build").exists());
+        drop(admission);
+        assert!(cleanup.await.unwrap().unwrap().errors.is_empty());
+        assert!(!project.join("build").exists());
+        assert!(core.artifact_operations.try_read().is_ok());
     }
 }

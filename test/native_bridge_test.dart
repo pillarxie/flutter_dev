@@ -24,13 +24,25 @@ void main() {
       StreamSubscription<CoreEvent>? subscription;
       try {
         await File('${directory.path}/pubspec.yaml').writeAsString(
-          'name: bridge_sample\ndependencies:\n  flutter:\n    sdk: flutter\n',
+          'name: bridge_sample\nversion: 1.2.3+42\ndependencies:\n  flutter:\n    sdk: flutter\n',
         );
         await Directory('${directory.path}/lib').create();
         final source = File('${directory.path}/lib/main.dart');
         await source.writeAsString('void main() {\n  print("你好 🦀");\n}\n');
         final projects = await api.discoverProjects(root: directory.path);
         expect(projects.single.name, 'bridge_sample');
+        final projectVersion = await api.readBuildVersion(
+          projectPath: directory.path,
+          args: const [],
+        );
+        expect(projectVersion.buildName, '1.2.3');
+        expect(projectVersion.buildNumber, '42');
+        final overriddenVersion = await api.readBuildVersion(
+          projectPath: directory.path,
+          args: const ['--build-name=2.4.6', '--build-number', '99'],
+        );
+        expect(overriddenVersion.buildName, '2.4.6');
+        expect(overriddenVersion.buildNumber, '99');
         await expectLater(
           api.openDevtools(sessionId: 'missing', module: 'memory'),
           throwsA(predicate((error) => '$error'.contains('Unknown session'))),
@@ -87,7 +99,13 @@ void main() {
           expect(chmod.exitCode, 0);
         }
         final saved = await api.setDefaultSdk(path: sdkDirectory.path);
-        expect(saved.defaultSdkPath, await sdkDirectory.resolveSymbolicLinks());
+        expect(
+          await FileSystemEntity.identical(
+            saved.defaultSdkPath!,
+            sdkDirectory.path,
+          ),
+          isTrue,
+        );
         expect(saved.themeMode, 'dark');
         final light = await api.setThemeMode(mode: 'light');
         expect(light.themeMode, 'light');
@@ -119,6 +137,7 @@ void main() {
         expect(independent.fallbackReason, isNull);
 
         final presets = await api.setBuildPresets(
+          projectPath: directory.path,
           presets: const [
             build.BuildPreset(
               id: 'unicode-build',
@@ -129,14 +148,20 @@ void main() {
             ),
           ],
         );
-        expect(presets.buildPresets.single.name, '测试构建 🦀');
-        expect(presets.defaultSdkPath, saved.defaultSdkPath);
+        expect(presets.single.name, '测试构建 🦀');
         expect(
-          (await api.setThemeMode(mode: 'light')).buildPresets.single.args,
+          (await api.getAppSettings()).defaultSdkPath,
+          saved.defaultSdkPath,
+        );
+        await api.setThemeMode(mode: 'light');
+        expect(
+          (await api.getBuildPresets(projectPath: directory.path)).single.args,
           ['--debug', '--dart-define=NAME=你好 世界'],
         );
         expect(
-          (await api.getAppSettings()).buildPresets.single.outputDirectory,
+          (await api.getBuildPresets(
+            projectPath: directory.path,
+          )).single.outputDirectory,
           '自定义产物',
         );
 
@@ -156,7 +181,30 @@ void main() {
         expect(workspace.projects.last.platforms, ['macos', 'web']);
         expect(workspace.selectedProjectPath, missingProject.path);
         expect(workspace.defaultSdkPath, saved.defaultSdkPath);
-        expect(workspace.buildPresets.single.name, '测试构建 🦀');
+        expect(
+          (await api.getBuildPresets(projectPath: directory.path)).single.name,
+          '测试构建 🦀',
+        );
+        final otherDefaults = await api.getBuildPresets(
+          projectPath: missingProject.path,
+        );
+        expect(otherDefaults, isNotEmpty);
+        expect(
+          otherDefaults.any((preset) => preset.id == 'unicode-build'),
+          isFalse,
+        );
+        final otherPresets = await api.setBuildPresets(
+          projectPath: missingProject.path,
+          presets: const [
+            build.BuildPreset(
+              id: 'unicode-build',
+              name: '另一个项目的同名 ID 预设',
+              target: 'web',
+              args: ['--release', '--dart-define=PROJECT=second'],
+            ),
+          ],
+        );
+        expect(otherPresets.single.target, 'web');
         final workspaceAfterTheme = await api.setThemeMode(mode: 'light');
         expect(workspaceAfterTheme.projects, hasLength(2));
         expect(workspaceAfterTheme.selectedProjectPath, missingProject.path);
@@ -170,11 +218,41 @@ void main() {
         final restoredWorkspace = await api.getAppSettings();
         expect(restoredWorkspace.projects.last.path, missingProject.path);
         expect(restoredWorkspace.selectedProjectPath, missingProject.path);
+        expect(
+          (await api.getBuildPresets(projectPath: directory.path)).single.args,
+          ['--debug', '--dart-define=NAME=你好 世界'],
+        );
+        expect(
+          (await api.getBuildPresets(
+            projectPath: missingProject.path,
+          )).single.name,
+          '另一个项目的同名 ID 预设',
+        );
+        expect(
+          await api.setBuildPresets(
+            projectPath: missingProject.path,
+            presets: const [],
+          ),
+          isEmpty,
+        );
+        await api.setThemeMode(mode: 'light');
+        await api.setWorkspaceProjects(
+          projects: restoredWorkspace.projects,
+          selectedProjectPath: missingProject.path,
+        );
+        expect(
+          await api.getBuildPresets(projectPath: missingProject.path),
+          isEmpty,
+        );
+        expect(
+          (await api.getBuildPresets(projectPath: directory.path)).single.name,
+          '测试构建 🦀',
+        );
 
         // The build fixture fails deliberately, avoiding an actual desktop opener.
         await program.writeAsString(
           Platform.isWindows
-              ? '@echo off\r\nif "%1"=="--version" (\r\necho $version\r\nexit /b 0\r\n)\r\necho build fixture failed 1>&2\r\nexit /b 23\r\n'
+              ? '@echo off\r\nif "%~1"=="--version" (\r\necho $version\r\nexit /b 0\r\n)\r\necho build fixture failed 1>&2\r\nexit /b 23\r\n'
               : '#!/bin/sh\nif [ "\$1" = "--version" ]; then\nprintf \'%s\\n\' \'$version\'\nexit 0\nfi\nprintf \'%s\\n\' \'build fixture failed\' >&2\nexit 23\n',
         );
         final startedBuild = await api.startBuild(
@@ -182,13 +260,31 @@ void main() {
             projectPath: directory.path,
             sdkPath: sdkDirectory.path,
             target: 'bundle',
-            args: const ['--debug'],
+            args: const ['--debug', '--build-number=77'],
             outputDirectory: null,
           ),
+        );
+        expect(startedBuild.version!.buildName, '1.2.3');
+        expect(startedBuild.version!.buildNumber, '77');
+        await File('${directory.path}/pubspec.yaml').writeAsString(
+          'name: bridge_sample\nversion: 9.9.9+9\ndependencies:\n  flutter:\n    sdk: flutter\n',
         );
         final failedBuild = await waitForBuildTerminal(startedBuild.id);
         expect(failedBuild.state, 'failed');
         expect(failedBuild.exitCode, 23);
+        final builds = await api.listBuilds();
+        expect(builds.single.id, startedBuild.id);
+        expect(builds.single.state, 'failed');
+        expect(builds.single.exitCode, 23);
+        expect(builds.single.version!.buildName, '1.2.3');
+        expect(builds.single.version!.buildNumber, '77');
+        expect(failedBuild.version!.buildNumber, '77');
+        final nextVersion = await api.readBuildVersion(
+          projectPath: directory.path,
+          args: const [],
+        );
+        expect(nextVersion.buildName, '9.9.9');
+        expect(nextVersion.buildNumber, '9');
         final buildLogs = await api.readBuildLogs(
           buildId: startedBuild.id,
           afterId: 0,
@@ -238,10 +334,19 @@ void main() {
           isTrue,
         );
         await api.shutdownCore();
+        expect(await api.listBuilds(), isEmpty);
         await api.setDefaultSdk(path: null);
         expect((await api.getAppSettings()).defaultSdkPath, isNull);
         expect((await api.getAppSettings()).themeMode, 'light');
         expect((await api.getAppSettings()).projects, hasLength(2));
+        expect(
+          (await api.getBuildPresets(projectPath: directory.path)).single.name,
+          '测试构建 🦀',
+        );
+        expect(
+          await api.getBuildPresets(projectPath: missingProject.path),
+          isEmpty,
+        );
         expect(
           (await api.getAppSettings()).selectedProjectPath,
           missingProject.path,

@@ -5,10 +5,58 @@ import 'package:flutter/services.dart';
 
 import '../../core/presentation/workbench_models.dart';
 
+/// Only recognize Dart source coordinates, rather than arbitrary URLs / numbers.
+List<({String path, int line, int? column})> logSourceLocations(String text) {
+  final pattern = RegExp(
+    // Spaces belong to a directory / file name until the Dart coordinate.
+    // Delimiters and complete earlier Dart names bound the candidate, while a
+    // prefix boundary prevents a URI or a path suffix from becoming a new root.
+    r'''(?<![\w:/\\])(?:package:[A-Za-z0-9_]+/|file:///|[A-Za-z]:[\\/]|/(?=[^\s/])|(?:\./|\.\./)?(?:lib|test|integration_test)/)(?:(?!\.dart(?:\s|:)|\s[\\/])[^()\r\n<>"'|])*?\.dart:([1-9][0-9]*)(?::([1-9][0-9]*))?(?=$|[\s)\]>,;'"}])''',
+  );
+  final locations = <({String path, int line, int? column})>[];
+  for (final match in pattern.allMatches(text)) {
+    // Reject coordinates occurring inside http(s) and other network URIs.
+    final prefix = text.substring(0, match.start).split(RegExp(r'\s')).last;
+    if (prefix.contains('://') || prefix.endsWith(':')) continue;
+    final coordinate = match.group(0)!;
+    if (coordinate.contains('://') && !coordinate.startsWith('file:///')) {
+      continue;
+    }
+    final suffix =
+        ':${match.group(1)}${match.group(2) == null ? '' : ':${match.group(2)}'}';
+    final location = (
+      path: coordinate.substring(0, coordinate.length - suffix.length),
+      line: int.parse(match.group(1)!),
+      column: int.tryParse(match.group(2) ?? ''),
+    );
+    if (!locations.contains(location)) locations.add(location);
+  }
+  return locations;
+}
+
+bool _isError(LogEntry entry) =>
+    const {
+      'stderr',
+      'error',
+      'errors',
+      'exception',
+      'exceptions',
+    }.contains(entry.category.toLowerCase()) ||
+    RegExp(
+      r'(^|[\s:])(error|exception|[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)|unhandled exception|assertion failed)(\b|:)',
+      caseSensitive: false,
+    ).hasMatch(entry.text);
+
 class LogPanel extends StatefulWidget {
-  const LogPanel({super.key, required this.bridge, required this.session});
+  const LogPanel({
+    super.key,
+    required this.bridge,
+    required this.session,
+    this.searchFocus,
+  });
   final WorkbenchBridge bridge;
   final Session? session;
+  final FocusNode? searchFocus;
   @override
   State<LogPanel> createState() => _LogPanelState();
 }
@@ -21,7 +69,8 @@ class _LogPanelState extends State<LogPanel> {
   Timer? _timer;
   int _cursor = 0, _revision = 0, _dropped = 0;
   int _generation = 0, _sequence = -1;
-  bool _loading = false, _pending = false, _follow = true;
+  bool _loading = false, _pending = false, _follow = true, _errorsOnly = false;
+  String? _sourceError;
   String? _error;
 
   @override
@@ -46,7 +95,8 @@ class _LogPanelState extends State<LogPanel> {
   @override
   void didUpdateWidget(LogPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.session?.generation != widget.session?.generation) {
+    if (oldWidget.session?.id != widget.session?.id ||
+        oldWidget.session?.generation != widget.session?.generation) {
       _generation = widget.session?.generation ?? 0;
       _sequence = -1;
       _reset();
@@ -60,6 +110,7 @@ class _LogPanelState extends State<LogPanel> {
     _cursor = 0;
     _dropped = 0;
     _error = null;
+    _sourceError = null;
   }
 
   void _schedule({bool reset = false}) {
@@ -85,7 +136,9 @@ class _LogPanelState extends State<LogPanel> {
       );
       if (!mounted || revision != _revision) return;
       setState(() {
-        _entries.addAll(page.entries);
+        _entries.addAll(
+          page.entries.where((entry) => !_errorsOnly || _isError(entry)),
+        );
         _cursor = page.nextAfterId;
         _dropped = page.droppedBeforeId;
         // A display window, independent from the core's bounded retention.
@@ -104,7 +157,10 @@ class _LogPanelState extends State<LogPanel> {
       if (page.entries.length == 200) _pending = true;
       if (_follow) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_scroll.hasClients) {
+          if (mounted &&
+              revision == _revision &&
+              _follow &&
+              _scroll.hasClients) {
             _scroll.jumpTo(_scroll.position.maxScrollExtent);
           }
         });
@@ -114,6 +170,27 @@ class _LogPanelState extends State<LogPanel> {
     } finally {
       _loading = false;
       if (_pending && mounted) _schedule();
+    }
+  }
+
+  Future<void> _openSource(
+    ({String path, int line, int? column}) location,
+  ) async {
+    final session = widget.session;
+    if (session == null) return;
+    final revision = _revision;
+    setState(() => _sourceError = null);
+    try {
+      await widget.bridge.openSourceLocation(
+        session.projectPath,
+        location.path,
+        location.line,
+        location.column ?? 1,
+      );
+    } catch (error) {
+      if (mounted && revision == _revision) {
+        setState(() => _sourceError = '打开源码失败，可点击源码按钮重试：$error');
+      }
     }
   }
 
@@ -146,49 +223,88 @@ class _LogPanelState extends State<LogPanel> {
           children: [
             Padding(
               padding: EdgeInsets.fromLTRB(padding, 18, padding, 16),
-              child: Row(
+              child: Column(
                 children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _query,
-                      decoration: const InputDecoration(
-                        prefixIcon: Icon(Icons.search, size: 19),
-                        hintText: '搜索日志内容…',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    tooltip: _follow ? '关闭跟随输出' : '跟随输出',
-                    onPressed: () => setState(() => _follow = !_follow),
-                    color: _follow ? colors.primary : colors.onSurfaceVariant,
-                    icon: Icon(
-                      _follow ? Icons.vertical_align_bottom : Icons.pause,
-                      size: 19,
-                    ),
-                  ),
-                  IconButton.outlined(
-                    tooltip: '复制可见日志',
-                    onPressed: _entries.isEmpty
-                        ? null
-                        : () => Clipboard.setData(
-                            ClipboardData(
-                              text: _entries.map((e) => e.text).join('\n'),
-                            ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _query,
+                          focusNode: widget.searchFocus,
+                          decoration: const InputDecoration(
+                            prefixIcon: Icon(Icons.search, size: 19),
+                            hintText: '搜索日志内容…',
                           ),
-                    icon: const Icon(Icons.copy_outlined, size: 18),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: _follow ? '暂停滚动（继续接收日志）' : '恢复跟随输出',
+                        onPressed: () => setState(() => _follow = !_follow),
+                        color: _follow
+                            ? colors.primary
+                            : colors.onSurfaceVariant,
+                        icon: Icon(
+                          _follow ? Icons.pause : Icons.vertical_align_bottom,
+                          size: 19,
+                        ),
+                      ),
+                      IconButton.outlined(
+                        tooltip: '复制可见日志',
+                        onPressed: _entries.isEmpty
+                            ? null
+                            : () => Clipboard.setData(
+                                ClipboardData(
+                                  text: _entries.map((e) => e.text).join('\n'),
+                                ),
+                              ),
+                        icon: const Icon(Icons.copy_outlined, size: 18),
+                      ),
+                      const SizedBox(width: 6),
+                      IconButton.outlined(
+                        tooltip: '重新读取日志',
+                        onPressed: session == null
+                            ? null
+                            : () => _schedule(reset: true),
+                        icon: const Icon(Icons.refresh, size: 20),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 6),
-                  IconButton.outlined(
-                    tooltip: '重新读取日志',
-                    onPressed: session == null
-                        ? null
-                        : () => _schedule(reset: true),
-                    icon: const Icon(Icons.refresh, size: 20),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      FilterChip(
+                        key: const Key('log-errors-filter'),
+                        label: const Text('仅错误'),
+                        selected: _errorsOnly,
+                        onSelected: (selected) {
+                          _errorsOnly = selected;
+                          _schedule(reset: true);
+                        },
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          _follow ? '跟随输出中' : '已暂停滚动 · 继续接收日志',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: colors.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
+            if (_sourceError != null)
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: padding, vertical: 8),
+                child: SelectableText(
+                  _sourceError!,
+                  style: TextStyle(color: colors.error),
+                ),
+              ),
             if (session?.error != null || _error != null)
               Padding(
                 padding: EdgeInsets.symmetric(horizontal: padding, vertical: 8),
@@ -241,7 +357,8 @@ class _LogPanelState extends State<LogPanel> {
                       itemCount: _entries.length,
                       itemBuilder: (context, i) {
                         final entry = _entries[i];
-                        final error = entry.category == 'stderr';
+                        final error = _isError(entry);
+                        final locations = logSourceLocations(entry.text);
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 9),
                           child: Row(
@@ -268,22 +385,49 @@ class _LogPanelState extends State<LogPanel> {
                                 ),
                               ),
                               Expanded(
-                                child: SelectableText(
-                                  entry.text,
-                                  style: TextStyle(
-                                    fontFamily: 'monospace',
-                                    fontFamilyFallback: const [
-                                      '.AppleSystemUIFont',
-                                      'PingFang SC',
-                                      'Segoe UI',
-                                      'Arial',
-                                    ],
-                                    fontSize: 13,
-                                    height: 1.65,
-                                    color: error
-                                        ? colors.error
-                                        : colors.onSurface,
-                                  ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    SelectableText(
+                                      entry.text,
+                                      style: TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontFamilyFallback: const [
+                                          '.AppleSystemUIFont',
+                                          'PingFang SC',
+                                          'Segoe UI',
+                                          'Arial',
+                                        ],
+                                        fontSize: 13,
+                                        height: 1.65,
+                                        color: error
+                                            ? colors.error
+                                            : colors.onSurface,
+                                      ),
+                                    ),
+                                    if (locations.isNotEmpty)
+                                      Wrap(
+                                        spacing: 6,
+                                        children: [
+                                          for (final location in locations)
+                                            TextButton.icon(
+                                              key: ValueKey(
+                                                'log-source-${entry.id}-${location.path}:${location.line}',
+                                              ),
+                                              onPressed: () =>
+                                                  _openSource(location),
+                                              icon: const Icon(
+                                                Icons.open_in_new,
+                                                size: 14,
+                                              ),
+                                              label: Text(
+                                                '${location.path.split(RegExp(r"[/\\]")).last}:${location.line}',
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                  ],
                                 ),
                               ),
                             ],

@@ -4,22 +4,37 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../build.dart';
+import '../build_cache.dart';
 import '../device.dart';
 import '../devtools.dart';
 import '../frb_generated.dart';
 import '../log.dart';
 import '../project.dart';
+import '../project_git.dart';
 import '../sdk.dart';
 import '../session.dart';
 import '../settings.dart';
+import '../test_runner.dart';
+import '../workspace.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `core`, `debug_request`, `network_arguments`, `network_request_for_session`, `session`, `validate_network_session`
+// These functions are ignored because they are not marked as `pub`: `clear_build_cache_for`, `core`, `debug_request`, `network_arguments`, `network_request_for_session`, `session`, `validate_network_session`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `fmt`
 
 Future<List<ProjectInfo>> discoverProjects({required String root}) =>
     RustLib.instance.api.crateApiCoreDiscoverProjects(root: root);
+
+Future<ProjectGitInfo?> projectGitInfo({required String projectPath}) =>
+    RustLib.instance.api.crateApiCoreProjectGitInfo(projectPath: projectPath);
+
+Future<ProjectGitInfo> switchProjectBranch({
+  required String projectPath,
+  required String branch,
+}) => RustLib.instance.api.crateApiCoreSwitchProjectBranch(
+  projectPath: projectPath,
+  branch: branch,
+);
 
 Future<SdkInfo> resolveSdk({String? projectPath, String? explicitPath}) =>
     RustLib.instance.api.crateApiCoreResolveSdk(
@@ -36,8 +51,16 @@ Future<AppSettings> setDefaultSdk({String? path}) =>
 Future<AppSettings> setThemeMode({required String mode}) =>
     RustLib.instance.api.crateApiCoreSetThemeMode(mode: mode);
 
-Future<AppSettings> setBuildPresets({required List<BuildPreset> presets}) =>
-    RustLib.instance.api.crateApiCoreSetBuildPresets(presets: presets);
+Future<List<BuildPreset>> getBuildPresets({required String projectPath}) =>
+    RustLib.instance.api.crateApiCoreGetBuildPresets(projectPath: projectPath);
+
+Future<List<BuildPreset>> setBuildPresets({
+  required String projectPath,
+  required List<BuildPreset> presets,
+}) => RustLib.instance.api.crateApiCoreSetBuildPresets(
+  projectPath: projectPath,
+  presets: presets,
+);
 
 Future<AppSettings> setWorkspaceProjects({
   required List<ProjectInfo> projects,
@@ -47,11 +70,70 @@ Future<AppSettings> setWorkspaceProjects({
   selectedProjectPath: selectedProjectPath,
 );
 
+Future<AppSettings> setWorkspacePreferences({
+  required WorkspacePreferences preferences,
+}) => RustLib.instance.api.crateApiCoreSetWorkspacePreferences(
+  preferences: preferences,
+);
+
+Future<void> openSourceLocation({
+  required String projectPath,
+  required String path,
+  required int line,
+  required int column,
+}) => RustLib.instance.api.crateApiCoreOpenSourceLocation(
+  projectPath: projectPath,
+  path: path,
+  line: line,
+  column: column,
+);
+
+Future<List<String>> discoverTestFiles({required String projectPath}) => RustLib
+    .instance
+    .api
+    .crateApiCoreDiscoverTestFiles(projectPath: projectPath);
+
+Future<TestRunSnapshot> startTestRun({required TestRunConfig config}) =>
+    RustLib.instance.api.crateApiCoreStartTestRun(config: config);
+
+Future<TestRunSnapshot> testRunSnapshot({required String runId}) =>
+    RustLib.instance.api.crateApiCoreTestRunSnapshot(runId: runId);
+
+Future<List<TestRunSnapshot>> listTestRuns() =>
+    RustLib.instance.api.crateApiCoreListTestRuns();
+
+Future<LogPage> readTestLogs({
+  required String runId,
+  required int afterId,
+  required int limit,
+}) => RustLib.instance.api.crateApiCoreReadTestLogs(
+  runId: runId,
+  afterId: afterId,
+  limit: limit,
+);
+
+Future<void> stopTestRun({required String runId}) =>
+    RustLib.instance.api.crateApiCoreStopTestRun(runId: runId);
+
 Future<BuildSnapshot> startBuild({required BuildConfiguration config}) =>
     RustLib.instance.api.crateApiCoreStartBuild(config: config);
 
+Future<BuildCacheCleanupResult> clearBuildCache() =>
+    RustLib.instance.api.crateApiCoreClearBuildCache();
+
+Future<BuildVersion> readBuildVersion({
+  required String projectPath,
+  required List<String> args,
+}) => RustLib.instance.api.crateApiCoreReadBuildVersion(
+  projectPath: projectPath,
+  args: args,
+);
+
 Future<BuildSnapshot> buildSnapshot({required String buildId}) =>
     RustLib.instance.api.crateApiCoreBuildSnapshot(buildId: buildId);
+
+Future<List<BuildSnapshot>> listBuilds() =>
+    RustLib.instance.api.crateApiCoreListBuilds();
 
 Future<LogPage> readBuildLogs({
   required String buildId,

@@ -12,11 +12,13 @@ class NetworkPayloadTree extends StatelessWidget {
     required this.identity,
     required this.expanded,
     required this.onToggle,
+    this.defaultExpanded,
   });
+  final bool? defaultExpanded;
   final Object value;
   final String identity;
   final Map<String, bool> expanded;
-  final ValueChanged<String> onToggle;
+  final void Function(String id, bool expanded) onToggle;
 
   static const _maximumNodes = 200;
   static const _maximumDepth = 12;
@@ -48,7 +50,7 @@ class NetworkPayloadTree extends StatelessWidget {
       nodes++;
       final container = value is Map || value is List;
       final id = '$identity-$pointer';
-      final open = expanded[id] ?? depth <= 1;
+      final open = expanded[id] ?? defaultExpanded ?? depth <= 1;
       final count = value is Map
           ? value.length
           : value is List
@@ -75,7 +77,7 @@ class NetworkPayloadTree extends StatelessWidget {
                       height: 24,
                     ),
                     visualDensity: VisualDensity.compact,
-                    onPressed: () => onToggle(id),
+                    onPressed: () => onToggle(id, !open),
                     icon: Icon(
                       open ? Icons.keyboard_arrow_down : Icons.chevron_right,
                       size: 16,

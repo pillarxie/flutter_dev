@@ -59,15 +59,15 @@ void main() {
           defaultSdkPath: '/Users/developer/flutter',
           projects: const [project],
           selectedProjectPath: project.path,
-          buildPresets: const [
-            BuildPreset(
-              id: 'android',
-              name: 'Android Release',
-              target: 'apk',
-              args: ['--release'],
-            ),
-          ],
-        );
+        )
+        ..projectBuildPresets[project.path] = const [
+          BuildPreset(
+            id: 'android',
+            name: 'Android Release',
+            target: 'apk',
+            args: ['--release'],
+          ),
+        ];
       addTearDown(bridge.controller.close);
       final captureKey = GlobalKey();
       await tester.pumpWidget(

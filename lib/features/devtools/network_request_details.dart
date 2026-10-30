@@ -31,7 +31,9 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
   );
   final _scrolls = List.generate(3, (_) => ScrollController());
   final _raw = <String, bool>{};
-  final _payloadExpanded = <String, bool>{};
+  final _jsonExpanded = <String, bool>{};
+  final _sectionExpanded = <String, bool>{};
+  final _responseSearch = TextEditingController();
   int _tab = 1;
   late NetworkContent _query,
       _requestBody,
@@ -51,7 +53,9 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
     if (oldWidget.requestKey != widget.requestKey) {
       _tab = 1;
       _raw.clear();
-      _payloadExpanded.clear();
+      _jsonExpanded.clear();
+      _sectionExpanded.clear();
+      _responseSearch.clear();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         for (final scroll in _scrolls) {
@@ -135,6 +139,7 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
 
   @override
   void dispose() {
+    _responseSearch.dispose();
     for (final controller in _scrolls) {
       controller.dispose();
     }
@@ -209,6 +214,16 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
                   _failure(_map(widget.data['request'])['error']),
               ]),
               _tabContent(2, [
+                TextField(
+                  key: const ValueKey('network-response-search'),
+                  controller: _responseSearch,
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search, size: 18),
+                    hintText: '搜索响应正文…',
+                  ),
+                ),
+                const SizedBox(height: 8),
                 _section(
                   'response-body',
                   '响应正文',
@@ -414,24 +429,29 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
     final originalText = raw ? content.raw : content.formatted;
     final text = _preview(originalText);
     final truncated = originalText.length > networkPreviewLimit;
+    final search = id == 'response-body' ? _responseSearch.text : '';
+    final matches = search.isEmpty
+        ? <RegExpMatch>[]
+        : RegExp(
+            RegExp.escape(search),
+            caseSensitive: false,
+          ).allMatches(text).toList();
     var fields = content.fields;
     var jsonBody = false;
-    if (id == 'request-body' && fields.isEmpty && !raw) {
-      try {
-        final body = jsonDecode(content.formatted);
-        if (body is Map &&
-            (body['payload'] is Map || body['payload'] is List)) {
-          fields = [
-            for (final entry in body.entries)
-              NetworkField(
-                entry.key.toString(),
-                const JsonEncoder.withIndent('  ').convert(entry.value),
-              ),
-          ];
-          jsonBody = true;
-        }
-      } on FormatException {
-        // Invalid or preview-truncated JSON remains ordinary selectable text.
+    Object? body;
+    if ((id == 'request-body' || id == 'response-body') &&
+        fields.isEmpty &&
+        !raw) {
+      body = _jsonContainer(content.raw);
+      if (id == 'request-body' && body is Map && body.isNotEmpty) {
+        fields = [
+          for (final entry in body.entries)
+            NetworkField(
+              entry.key.toString(),
+              const JsonEncoder.withIndent('  ').convert(entry.value),
+            ),
+        ];
+        jsonBody = true;
       }
     }
     return Padding(
@@ -497,6 +517,39 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
               ),
             ],
           ),
+          if (!raw &&
+              const ['query', 'request-body', 'response-body'].contains(id) &&
+              (body != null ||
+                  fields.any((field) => _jsonContainer(field.value) != null)))
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final open in [true, false])
+                  TextButton(
+                    key: ValueKey(
+                      'network-json-${open ? 'expand' : 'collapse'}-$id',
+                    ),
+                    onPressed: () => setState(() {
+                      _sectionExpanded[id] = open;
+                      _jsonExpanded.removeWhere(
+                        (key, _) => key.startsWith('$id::'),
+                      );
+                    }),
+                    child: Text(
+                      open ? '全部展开' : '全部收起',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+              ],
+            ),
+          if (search.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '${matches.length} 处匹配 · 搜索时以文本展示，包含折叠节点（当前预览范围）',
+                style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant),
+              ),
+            ),
           if (content.note != null)
             Padding(
               padding: const EdgeInsets.only(top: 2, bottom: 8),
@@ -517,8 +570,14 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
                 style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant),
               ),
             ),
-          if (!raw && fields.isNotEmpty)
-            _fields(fields, payload: id == 'request-body', jsonBody: jsonBody)
+          if (search.isNotEmpty)
+            SelectableText.rich(
+              TextSpan(style: _mono, children: _highlight(text, matches)),
+            )
+          else if (!raw && fields.isNotEmpty)
+            _fields(fields, section: id, jsonBody: jsonBody)
+          else if (body != null)
+            _jsonTree(body, identity: id, section: id)
           else if (text.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
@@ -540,24 +599,13 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
   Widget _fieldValue(
     NetworkField field, {
     required String identity,
-    required bool payload,
+    required bool json,
+    required String section,
   }) {
-    if (payload && field.name == 'payload') {
-      try {
-        final value = jsonDecode(field.value);
-        if (value is Map || value is List) {
-          return NetworkPayloadTree(
-            value: value as Object,
-            identity: identity,
-            expanded: _payloadExpanded,
-            onToggle: (id) => setState(
-              () => _payloadExpanded[id] =
-                  !(_payloadExpanded[id] ?? _defaultExpanded(id)),
-            ),
-          );
-        }
-      } on FormatException {
-        // No additional decoding: malformed JSON is shown exactly as text.
+    if (json) {
+      final value = _jsonContainer(field.value);
+      if (value != null) {
+        return _jsonTree(value, identity: identity, section: section);
       }
     }
     return SelectableText(
@@ -566,12 +614,59 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
     );
   }
 
-  bool _defaultExpanded(String id) =>
-      '/'.allMatches(id.substring(id.indexOf(r'$') + 1)).length <= 1;
+  Object? _jsonContainer(String text) {
+    try {
+      final value = jsonDecode(text);
+      return value is Map || value is List ? value : null;
+    } on FormatException {
+      // No additional decoding: malformed or truncated JSON stays text.
+      return null;
+    }
+  }
+
+  List<InlineSpan> _highlight(String text, List<RegExpMatch> matches) {
+    final spans = <InlineSpan>[];
+    var end = 0;
+    final colors = Theme.of(context).colorScheme;
+    for (final match in matches) {
+      if (match.start > end) {
+        spans.add(TextSpan(text: text.substring(end, match.start)));
+      }
+      spans.add(
+        TextSpan(
+          text: text.substring(match.start, match.end),
+          style: TextStyle(
+            backgroundColor: colors.tertiaryContainer,
+            color: colors.onTertiaryContainer,
+          ),
+        ),
+      );
+      end = match.end;
+    }
+    spans.add(TextSpan(text: text.substring(end)));
+    return spans;
+  }
+
+  Widget _jsonTree(
+    Object value, {
+    required String identity,
+    required String section,
+  }) => NetworkPayloadTree(
+    value: value,
+    identity: identity,
+    defaultExpanded: _sectionExpanded[section],
+    expanded: {
+      for (final entry in _jsonExpanded.entries)
+        if (entry.key.startsWith('$section::'))
+          entry.key.substring(section.length + 2): entry.value,
+    },
+    onToggle: (id, expanded) =>
+        setState(() => _jsonExpanded['$section::$id'] = expanded),
+  );
 
   Widget _fields(
     List<NetworkField> fields, {
-    bool payload = false,
+    required String section,
     bool jsonBody = false,
   }) {
     final colors = Theme.of(context).colorScheme;
@@ -625,8 +720,18 @@ class _NetworkRequestDetailsState extends State<NetworkRequestDetails> {
                     Expanded(
                       child: _fieldValue(
                         visible[index],
-                        identity: jsonBody ? 'json-payload' : 'form-$index',
-                        payload: payload,
+                        identity: jsonBody
+                            ? 'json-${Uri.encodeComponent(visible[index].name)}'
+                            : section == 'request-body'
+                            ? 'form-$index'
+                            : section == 'query'
+                            ? 'query-$index'
+                            : '$section-field-$index',
+                        section: section,
+                        json:
+                            section == 'query' ||
+                            section == 'request-body' ||
+                            section == 'response-body',
                       ),
                     ),
                   ],

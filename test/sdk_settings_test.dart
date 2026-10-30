@@ -71,7 +71,7 @@ void main() {
     await openSettings(tester);
     expect(key('sdk-settings-page'), findsOneWidget);
     expect(sdkInput(tester), '/saved-sdk');
-    expect(find.byType(TextField), findsOneWidget);
+    expect(key('default-sdk-path'), findsOneWidget);
     expect(find.textContaining('尚未接入'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());

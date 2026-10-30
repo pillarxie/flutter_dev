@@ -21,7 +21,7 @@ jobs:
             library: libflutter_dev_core.so
     runs-on: ${{ matrix.os }}
     env:
-      FLUTTER_DEV_SETTINGS_PATH: ${{ runner.temp }}/flutter-dev-tests/settings.json
+      FLUTTER_DEV_SETTINGS_PATH: ${{ github.workspace }}/build/ci-test-settings/settings.json
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

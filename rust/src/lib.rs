@@ -1,12 +1,18 @@
 pub mod api;
+pub mod auto_reload;
 pub mod build;
+pub mod build_cache;
 pub mod device;
 pub mod devtools;
 mod frb_generated;
 pub mod log;
 pub mod process;
 pub mod project;
+pub mod project_git;
 pub mod protocol;
 pub mod sdk;
 pub mod session;
 pub mod settings;
+pub mod test_runner;
+mod vm_logs;
+pub mod workspace;

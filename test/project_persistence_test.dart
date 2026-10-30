@@ -73,8 +73,8 @@ void main() {
         ..appSettings = const AppSettings(
           defaultSdkPath: '/sdk',
           themeMode: 'dark',
-          buildPresets: [preset],
         )
+        ..projectBuildPresets['/first'] = [preset]
         ..discoverResponse = (path) => [path == '/first' ? first : second];
       await mount(tester, bridge);
       await addProject(tester, '/first');
@@ -88,14 +88,17 @@ void main() {
       expect(bridge.appSettings.selectedProjectPath, '/second');
       expect(bridge.appSettings.defaultSdkPath, '/sdk');
       expect(bridge.appSettings.themeMode, 'dark');
-      expect(bridge.appSettings.buildPresets.single.id, 'bundle');
+      expect((await bridge.getBuildPresets('/first')).single.id, 'bundle');
       await tester.pumpWidget(const SizedBox());
-      final restarted = FakeBridge()..appSettings = bridge.appSettings;
+      final restarted = FakeBridge()
+        ..appSettings = bridge.appSettings
+        ..projectBuildPresets.addAll(bridge.projectBuildPresets);
       await mount(tester, restarted);
       await tester.pumpAndSettle();
       expect(key('project-/first'), findsOneWidget);
       expect(key('project-/second'), findsOneWidget);
       expect(restarted.sdkRequests.single.projectPath, '/second');
+      expect((await restarted.getBuildPresets('/first')).single.id, 'bundle');
       await expandAdvancedSettings(tester);
       expect(
         tester.widget<TextField>(key('entrypoint')).controller!.text,

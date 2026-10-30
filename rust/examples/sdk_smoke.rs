@@ -38,6 +38,37 @@ async fn smoke(args: &[String]) -> Result<()> {
         .iter()
         .find(|d| d.id == "macos" || d.id == "windows" || d.id == "linux")
         .context("No desktop target")?;
+    let automatic_reload = args
+        .get(2)
+        .is_some_and(|arg| matches!(arg.as_str(), "--auto-reload" | "--auto-reload-dependencies"));
+    let dependency = if args
+        .get(2)
+        .is_some_and(|arg| arg == "--auto-reload-dependencies")
+    {
+        Some(disposable_dependency(&package.path).await?)
+    } else {
+        None
+    };
+    if automatic_reload {
+        anyhow::ensure!(
+            std::env::var_os("FLUTTER_DEV_SETTINGS_PATH").is_some_and(|path| !path.is_empty())
+                && std::path::Path::new(&package.path).join(".flutter-dev-smoke-owned").is_file()
+                && package.name == "flutter_dev_productivity_smoke",
+            "Automatic reload smoke requires isolated settings and an explicitly marked disposable sample"
+        );
+        let mut preferences = get_app_settings().await?.workspace_preferences;
+        preferences
+            .project_states
+            .retain(|state| state.project_path != package.path);
+        preferences.project_states.push(ProjectRunState {
+            project_path: package.path.clone(),
+            draft: None,
+            last_run: None,
+            selected_profile_id: None,
+            auto_reload: true,
+        });
+        set_workspace_preferences(preferences).await?;
+    }
     let session = start_session(RunConfiguration {
         project_path: package.path.clone(),
         sdk_path: sdk.path,
@@ -80,6 +111,14 @@ async fn smoke(args: &[String]) -> Result<()> {
     println!("DAP threads: {}", threads);
     if args.get(2).is_some_and(|arg| arg == "--network") {
         network_smoke(&session.session_id).await?;
+    } else if automatic_reload {
+        automatic_reload_smoke(
+            &session.session_id,
+            &package.path,
+            &package.entrypoint,
+            dependency.as_deref(),
+        )
+        .await?;
     } else if let Some(line) = args.get(2) {
         let path = std::path::Path::new(&package.path).join(&package.entrypoint);
         let response = set_breakpoints(
@@ -130,6 +169,12 @@ async fn smoke(args: &[String]) -> Result<()> {
         println!("Breakpoint / stack / variables / evaluate / step / continue: passed");
     }
     hot_reload(session.session_id.clone()).await?;
+    if automatic_reload {
+        wait_log(&session.session_id, "auto-smoke-marker-3").await?;
+        if dependency.is_some() {
+            wait_log(&session.session_id, "dependency-smoke-marker-3").await?;
+        }
+    }
     println!("Hot reload: passed");
     hot_restart(session.session_id.clone()).await?;
     println!("Hot restart: passed");
@@ -143,6 +188,142 @@ async fn smoke(args: &[String]) -> Result<()> {
         bail!("Stop did not converge to Ended");
     }
     println!("Launch / stop: passed");
+    Ok(())
+}
+
+// This optional fixture is a marked, sibling package outside the application.
+// Never discover and edit arbitrary dependencies of a supplied user project.
+async fn disposable_dependency(project: &str) -> Result<std::path::PathBuf> {
+    let project = tokio::fs::canonicalize(project).await?;
+    let dependency = tokio::fs::canonicalize(
+        project
+            .parent()
+            .context("Disposable application needs a parent directory")?
+            .join("flutter_dev_smoke_dependency"),
+    )
+    .await?;
+    let manifest: serde_yaml::Value =
+        serde_yaml::from_str(&tokio::fs::read_to_string(dependency.join("pubspec.yaml")).await?)?;
+    anyhow::ensure!(
+        !dependency.starts_with(&project)
+            && dependency.join(".flutter-dev-smoke-owned").is_file()
+            && manifest["name"].as_str() == Some("flutter_dev_smoke_dependency"),
+        "Dependency smoke requires a marked external disposable flutter_dev_smoke_dependency package"
+    );
+    Ok(dependency.join("lib/marker.dart"))
+}
+
+async fn wait_log(id: &str, marker: &str) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(40), async {
+        loop {
+            let logs = read_logs(id.into(), 0, 100, marker.into()).await?;
+            if logs.entries.iter().any(|entry| entry.text.contains(marker)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .with_context(|| format!("Expected session log did not arrive: {marker}"))??;
+    Ok(())
+}
+
+async fn wait_native_save(id: &str, marker: &str, saved: tokio::time::Instant) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(6), wait_log(id, marker))
+        .await
+        .context("Native file save did not reassemble before the 8-second polling fallback")??;
+    let elapsed = saved.elapsed();
+    anyhow::ensure!(
+        elapsed < Duration::from_secs(6),
+        "Native file save exceeded 6 seconds: {elapsed:?}"
+    );
+    println!("Native save -> {marker}: {elapsed:?}");
+    Ok(())
+}
+
+async fn automatic_reload_smoke(
+    id: &str,
+    project: &str,
+    entrypoint: &str,
+    dependency: Option<&std::path::Path>,
+) -> Result<()> {
+    wait_log(id, "Automatic hot reload monitoring ready").await?;
+    let path = std::path::Path::new(project).join(entrypoint);
+    let original = tokio::fs::read_to_string(&path).await?;
+    anyhow::ensure!(
+        original.contains("auto-smoke-marker-1"),
+        "Disposable sample marker is missing"
+    );
+    let changed = original.replace("auto-smoke-marker-1", "auto-smoke-marker-2");
+    let saved = tokio::time::Instant::now();
+    tokio::fs::write(&path, changed).await?;
+    wait_native_save(id, "auto-smoke-marker-2", saved).await?;
+    let logs = read_logs(id.into(), 0, 100, "automatic hot reload".into()).await?;
+    anyhow::ensure!(
+        logs.entries.len() == 1,
+        "Expected one debounced automatic reload, got {}",
+        logs.entries.len()
+    );
+    println!("Automatic file-save reload / reassemble marker: passed");
+    if let Some(dependency) = dependency {
+        let source = tokio::fs::read_to_string(dependency).await?;
+        anyhow::ensure!(
+            source.contains("dependency-smoke-marker-1"),
+            "Disposable dependency source marker is missing"
+        );
+        let saved = tokio::time::Instant::now();
+        tokio::fs::write(
+            dependency,
+            source.replace("dependency-smoke-marker-1", "dependency-smoke-marker-2"),
+        )
+        .await?;
+        wait_native_save(id, "dependency-smoke-marker-2", saved).await?;
+        // Span the periodic reconciliation too: it must not repeat events
+        // already consumed by the native directory watcher.
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let logs = read_logs(id.into(), 0, 100, "automatic hot reload".into()).await?;
+        anyhow::ensure!(
+            logs.entries.len() == 2,
+            "Expected exactly two automatic reloads for application and dependency saves, got {}",
+            logs.entries.len()
+        );
+        println!("External path dependency save / reassemble marker: passed");
+    }
+    let mut preferences = get_app_settings().await?.workspace_preferences;
+    for state in &mut preferences.project_states {
+        if state.project_path == project {
+            state.auto_reload = false;
+        }
+    }
+    set_workspace_preferences(preferences).await?;
+    tokio::fs::write(
+        &path,
+        original.replace("auto-smoke-marker-1", "auto-smoke-marker-3"),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let logs = read_logs(id.into(), 0, 100, "auto-smoke-marker-3".into()).await?;
+    anyhow::ensure!(
+        logs.entries.is_empty(),
+        "Disabled auto reload still executed"
+    );
+    println!("Disable automatic reload: passed");
+    if let Some(dependency) = dependency {
+        let source = tokio::fs::read_to_string(dependency).await?;
+        tokio::fs::write(
+            dependency,
+            source.replace("dependency-smoke-marker-2", "dependency-smoke-marker-3"),
+        )
+        .await?;
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let logs = read_logs(id.into(), 0, 100, "dependency-smoke-marker-3".into()).await?;
+        anyhow::ensure!(
+            logs.entries.is_empty(),
+            "Disabled dependency reload still executed"
+        );
+        println!("Disable external dependency automatic reload: passed");
+    }
     Ok(())
 }
 

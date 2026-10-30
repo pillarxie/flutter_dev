@@ -7,29 +7,34 @@ import 'build.dart';
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'project.dart';
+import 'session.dart';
+import 'workspace.dart';
 
 class AppSettings {
   final String? defaultSdkPath;
   final String themeMode;
-  final List<BuildPreset> buildPresets;
+  final List<ProjectBuildPresets> projectBuildPresets;
   final List<ProjectInfo> projects;
   final String? selectedProjectPath;
+  final WorkspacePreferences workspacePreferences;
 
   const AppSettings({
     this.defaultSdkPath,
     required this.themeMode,
-    required this.buildPresets,
+    required this.projectBuildPresets,
     required this.projects,
     this.selectedProjectPath,
+    required this.workspacePreferences,
   });
 
   @override
   int get hashCode =>
       defaultSdkPath.hashCode ^
       themeMode.hashCode ^
-      buildPresets.hashCode ^
+      projectBuildPresets.hashCode ^
       projects.hashCode ^
-      selectedProjectPath.hashCode;
+      selectedProjectPath.hashCode ^
+      workspacePreferences.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -38,7 +43,26 @@ class AppSettings {
           runtimeType == other.runtimeType &&
           defaultSdkPath == other.defaultSdkPath &&
           themeMode == other.themeMode &&
-          buildPresets == other.buildPresets &&
+          projectBuildPresets == other.projectBuildPresets &&
           projects == other.projects &&
-          selectedProjectPath == other.selectedProjectPath;
+          selectedProjectPath == other.selectedProjectPath &&
+          workspacePreferences == other.workspacePreferences;
+}
+
+class ProjectBuildPresets {
+  final String projectPath;
+  final List<BuildPreset> presets;
+
+  const ProjectBuildPresets({required this.projectPath, required this.presets});
+
+  @override
+  int get hashCode => projectPath.hashCode ^ presets.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProjectBuildPresets &&
+          runtimeType == other.runtimeType &&
+          projectPath == other.projectPath &&
+          presets == other.presets;
 }

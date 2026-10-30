@@ -1,12 +1,20 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../core/presentation/workbench_models.dart';
 import 'network_request_details.dart';
+import 'network_format.dart';
 
 class NetworkPanel extends StatefulWidget {
-  const NetworkPanel({super.key, required this.bridge, required this.session});
+  const NetworkPanel({
+    super.key,
+    required this.bridge,
+    required this.session,
+    this.searchFocus,
+  });
+  final FocusNode? searchFocus;
   final WorkbenchBridge bridge;
   final Session? session;
 
@@ -16,6 +24,8 @@ class NetworkPanel extends StatefulWidget {
 
 class _NetworkPanelState extends State<NetworkPanel> {
   final _query = TextEditingController();
+  final _methods = <String>{};
+  final _statuses = <String>{};
   final _requests = <String, Map<String, dynamic>>{};
   final _enabled = <String>{};
   final _cursors = <String, int>{};
@@ -286,10 +296,12 @@ class _NetworkPanelState extends State<NetworkPanel> {
     final requests =
         _requests.entries
             .where(
-              (e) =>
-                  '${e.value['method']} ${e.value['uri']} ${_map(e.value['response'])['statusCode']}'
-                      .toLowerCase()
-                      .contains(query),
+              (e) => matchesNetworkRequest(
+                e.value,
+                query: query,
+                methods: _methods,
+                statuses: _statuses,
+              ),
             )
             .toList()
           ..sort((a, b) => _start(b.value).compareTo(_start(a.value)));
@@ -303,6 +315,7 @@ class _NetworkPanelState extends State<NetworkPanel> {
                 child: TextField(
                   key: const ValueKey('network-search'),
                   controller: _query,
+                  focusNode: widget.searchFocus,
                   decoration: const InputDecoration(
                     prefixIcon: Icon(Icons.search, size: 18),
                     hintText: '搜索请求 URL、方法、状态码…',
@@ -329,12 +342,66 @@ class _NetworkPanelState extends State<NetworkPanel> {
                 onPressed: _live && !_loading ? _refresh : null,
                 icon: const Icon(Icons.refresh),
               ),
-              IconButton(
-                key: const ValueKey('network-clear'),
-                tooltip: '清空本地列表',
-                onPressed: _clear,
-                icon: const Icon(Icons.delete_outline),
+              Tooltip(
+                message: '清空全部本地请求（保留筛选条件）',
+                child: TextButton.icon(
+                  key: const ValueKey('network-clear'),
+                  onPressed: _clear,
+                  style: TextButton.styleFrom(
+                    foregroundColor: colors.onSurfaceVariant,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('清空', style: TextStyle(fontSize: 12)),
+                ),
               ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              _filter(
+                'method',
+                '方法',
+                _methods,
+                {
+                  'GET',
+                  'POST',
+                  'PUT',
+                  'PATCH',
+                  'DELETE',
+                  'HEAD',
+                  'OPTIONS',
+                  for (final request in _requests.values)
+                    if (request['method'] != null)
+                      request['method'].toString().toUpperCase(),
+                }.toList()..sort(),
+              ),
+              _filter('status', '状态', _statuses, const [
+                '2xx',
+                '3xx',
+                '4xx',
+                '5xx',
+                '进行中',
+                '失败',
+                '其他',
+              ]),
+              if (_methods.isNotEmpty ||
+                  _statuses.isNotEmpty ||
+                  query.isNotEmpty)
+                TextButton(
+                  key: const ValueKey('network-reset-filters'),
+                  onPressed: () => setState(() {
+                    _methods.clear();
+                    _statuses.clear();
+                    _query.clear();
+                  }),
+                  child: const Text('重置筛选'),
+                ),
             ],
           ),
         ),
@@ -425,7 +492,7 @@ class _NetworkPanelState extends State<NetworkPanel> {
                 ),
               ),
               Text(
-                '${_requests.length} / 500 条',
+                '${requests.length == _requests.length ? '' : '匹配 ${requests.length} · '}${_requests.length} / 500 条',
                 style: TextStyle(color: colors.onSurfaceVariant, fontSize: 11),
               ),
             ],
@@ -458,26 +525,108 @@ class _NetworkPanelState extends State<NetworkPanel> {
             ? '${((end - _start(request)) / 1000).toStringAsFixed(0)} ms'
             : '进行中';
         final size = response['contentLength'];
-        return ListTile(
-          key: ValueKey('network-request-${entry.key}'),
-          selected: entry.key == _selected,
-          onTap: () => _loadDetail(entry.key),
-          title: Text(
-            '${request['method'] ?? ''}  ${request['uri'] ?? ''}',
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 12),
-          ),
-          subtitle: Text(
-            '${code ?? (failed ? '失败' : '等待响应')} · $duration${size is int && size >= 0 ? ' · $size bytes' : ''}',
-            style: TextStyle(
-              fontSize: 11,
-              color: failed ? Theme.of(context).colorScheme.error : null,
+        return GestureDetector(
+          onSecondaryTapDown: (event) =>
+              _requestMenu(entry.key, event.globalPosition),
+          child: ListTile(
+            key: ValueKey('network-request-${entry.key}'),
+            selected: entry.key == _selected,
+            onTap: () => _loadDetail(entry.key),
+            title: Text(
+              '${request['method'] ?? ''}  ${request['uri'] ?? ''}',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12),
+            ),
+            subtitle: Text(
+              '${code ?? (failed ? '失败' : '等待响应')} · $duration${size is int && size >= 0 ? ' · $size bytes' : ''}',
+              style: TextStyle(
+                fontSize: 11,
+                color: failed ? Theme.of(context).colorScheme.error : null,
+              ),
             ),
           ),
         );
       },
     );
+  }
+
+  Widget _filter(
+    String id,
+    String label,
+    Set<String> selected,
+    List<String> values,
+  ) => PopupMenuButton<String>(
+    key: ValueKey('network-filter-$id'),
+    tooltip: '筛选$label，可多选',
+    onSelected: (value) => setState(() {
+      if (!selected.remove(value)) selected.add(value);
+    }),
+    itemBuilder: (_) => [
+      for (final value in values)
+        CheckedPopupMenuItem(
+          value: value,
+          checked: selected.contains(value),
+          child: Text(value),
+        ),
+    ],
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      child: Text(
+        '$label：${selected.isEmpty ? '全部' : selected.join('、')}',
+        style: const TextStyle(fontSize: 12),
+      ),
+    ),
+  );
+
+  Future<void> _requestMenu(String key, Offset position) async {
+    final epoch = _epoch;
+    final request = _requests[key];
+    if (request == null || !_live) return;
+    final overlay =
+        Overlay.of(context).context.findRenderObject()! as RenderBox;
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        position & Size.zero,
+        Offset.zero & overlay.size,
+      ),
+      items: const [PopupMenuItem(value: 'curl', child: Text('复制 cURL'))],
+    );
+    if (action != 'curl' ||
+        !mounted ||
+        epoch != _epoch ||
+        !_live ||
+        !_requests.containsKey(key)) {
+      return;
+    }
+    try {
+      final detail = await _rpc(
+        epoch,
+        widget.session!.id,
+        'ext.dart.io.getHttpProfileRequest',
+        {'isolateId': request['isolateId'], 'id': request['id']},
+      );
+      final command = networkCurl(detail);
+      await Clipboard.setData(ClipboardData(text: command));
+      if (mounted && epoch == _epoch) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已复制 cURL（POSIX Shell）')));
+      }
+    } on _StaleRequest {
+      // A menu action cannot change selection or copy an old session capture.
+    } catch (error) {
+      if (mounted && epoch == _epoch) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              error is FormatException ? error.message : '获取请求详情失败：$error',
+            ),
+          ),
+        );
+      }
+    }
   }
 
   Widget _details() {

@@ -5,12 +5,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_dev/app.dart';
 import 'package:flutter_dev/core/presentation/workbench_models.dart';
 
-class FakeBridge implements WorkbenchBridge {
+class FakeBridge extends WorkbenchBridge {
   final controller = StreamController<WorkbenchEvent>.broadcast(sync: true);
   List<Session> sessions = [];
   List<LogEntry> logs = [];
   int logReads = 0, starts = 0;
   List<Project> Function(String root)? discoverResponse;
+  Future<ProjectGitInfo?> Function(String projectPath)? gitResponse;
+  Future<ProjectGitInfo> Function(String projectPath, String branch)?
+  branchResponse;
+  final gitRequests = <String>[];
+  final branchRequests = <({String projectPath, String branch})>[];
   final discoveredRoots = <String>[];
   Future<Sdk> Function(String projectPath, String? explicitPath)? sdkResponse;
   AppSettings appSettings = const AppSettings();
@@ -58,6 +63,24 @@ class FakeBridge implements WorkbenchBridge {
   Stream<WorkbenchEvent> get events => controller.stream;
   @override
   Future<AppSettings> getAppSettings() async => initialSettings ?? appSettings;
+  final preferenceSaves = <WorkspacePreferences>[];
+  Future<AppSettings> Function(WorkspacePreferences)? preferencesResponse;
+  @override
+  Future<AppSettings> setWorkspacePreferences(
+    WorkspacePreferences preferences,
+  ) async {
+    preferenceSaves.add(preferences);
+    if (preferencesResponse != null) return preferencesResponse!(preferences);
+    appSettings = AppSettings(
+      defaultSdkPath: appSettings.defaultSdkPath,
+      themeMode: appSettings.themeMode,
+      projects: appSettings.projects,
+      selectedProjectPath: appSettings.selectedProjectPath,
+      workspacePreferences: preferences,
+    );
+    return appSettings;
+  }
+
   @override
   Future<AppSettings> setWorkspaceProjects(
     List<Project> projects,
@@ -71,29 +94,39 @@ class FakeBridge implements WorkbenchBridge {
       appSettings = AppSettings(
         defaultSdkPath: appSettings.defaultSdkPath,
         themeMode: appSettings.themeMode,
-        buildPresets: appSettings.buildPresets,
         projects: snapshot,
         selectedProjectPath: selectedProjectPath,
+        workspacePreferences: appSettings.workspacePreferences,
       );
     }
     return appSettings;
   }
 
+  final projectBuildPresets = <String, List<BuildPreset>>{};
+
   @override
-  Future<AppSettings> setBuildPresets(List<BuildPreset> presets) async {
-    appSettings = AppSettings(
-      defaultSdkPath: appSettings.defaultSdkPath,
-      themeMode: appSettings.themeMode,
-      buildPresets: presets,
-      projects: appSettings.projects,
-      selectedProjectPath: appSettings.selectedProjectPath,
-    );
-    return appSettings;
+  Future<List<BuildPreset>> getBuildPresets(String projectPath) async =>
+      List.of(projectBuildPresets[projectPath] ?? const []);
+
+  @override
+  Future<List<BuildPreset>> setBuildPresets(
+    String projectPath,
+    List<BuildPreset> presets,
+  ) async {
+    projectBuildPresets[projectPath] = List.of(presets);
+    return List.of(presets);
   }
 
   @override
   Future<BuildSnapshot> startBuild(BuildConfig config) async =>
       throw UnimplementedError();
+  @override
+  Future<BuildVersion> readBuildVersion(
+    String projectPath,
+    List<String> args,
+  ) async => const BuildVersion();
+  @override
+  Future<List<BuildSnapshot>> listBuilds() async => const [];
   @override
   Future<BuildSnapshot> buildSnapshot(String id) async =>
       throw UnimplementedError();
@@ -117,9 +150,9 @@ class FakeBridge implements WorkbenchBridge {
       appSettings = AppSettings(
         defaultSdkPath: path,
         themeMode: appSettings.themeMode,
-        buildPresets: appSettings.buildPresets,
         projects: appSettings.projects,
         selectedProjectPath: appSettings.selectedProjectPath,
+        workspacePreferences: appSettings.workspacePreferences,
       );
     }
     initialSettings = null;
@@ -133,9 +166,9 @@ class FakeBridge implements WorkbenchBridge {
         ? AppSettings(
             defaultSdkPath: appSettings.defaultSdkPath,
             themeMode: mode,
-            buildPresets: appSettings.buildPresets,
             projects: appSettings.projects,
             selectedProjectPath: appSettings.selectedProjectPath,
+            workspacePreferences: appSettings.workspacePreferences,
           )
         : await themeResponse!(mode);
     return appSettings;
@@ -148,6 +181,22 @@ class FakeBridge implements WorkbenchBridge {
         [
           Project(name: root.split('/').last, path: root, platforms: ['macos']),
         ];
+  }
+
+  @override
+  Future<ProjectGitInfo?> projectGitInfo(String projectPath) async {
+    gitRequests.add(projectPath);
+    return gitResponse?.call(projectPath);
+  }
+
+  @override
+  Future<ProjectGitInfo> switchProjectBranch(
+    String projectPath,
+    String branch,
+  ) async {
+    branchRequests.add((projectPath: projectPath, branch: branch));
+    if (branchResponse != null) return branchResponse!(projectPath, branch);
+    throw UnsupportedError('没有分支测试响应');
   }
 
   @override
@@ -334,6 +383,15 @@ Future<void> selectProject(WidgetTester tester, String path) async {
 }
 
 Future<void> selectSession(WidgetTester tester, String id) async {
+  if (key('session-$id').evaluate().isEmpty) {
+    final bridge = tester
+        .widget<FlutterDevApp>(find.byType(FlutterDevApp))
+        .bridge;
+    final session = (await bridge.listSessions()).firstWhere((s) => s.id == id);
+    await tester.tap(key('expand-${session.projectPath}'));
+    await tester.pumpAndSettle();
+  }
+  await tester.ensureVisible(key('session-$id'));
   await tester.tap(key('session-$id'));
   await tester.pumpAndSettle();
 }
@@ -424,6 +482,8 @@ void main() {
     );
     await tester.pump();
     snapshot.complete([running(sequence: 1, state: 'preparing')]);
+    await tester.pumpAndSettle();
+    await tester.tap(key('expand-/sample'));
     await tester.pumpAndSettle();
     expect(find.textContaining('已暂停'), findsWidgets);
     expect(find.textContaining('准备中'), findsNothing);
@@ -524,6 +584,8 @@ void main() {
         ),
       );
       await tester.pump();
+      await tester.tap(key('expand-/sample'));
+      await tester.pumpAndSettle();
       expect(find.textContaining('已暂停'), findsWidgets);
       expect(find.textContaining('运行中'), findsNothing);
       await tester.pumpWidget(const SizedBox());
@@ -885,6 +947,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(key('project-config'), findsOneWidget);
       expect(key('session-workspace'), findsNothing);
+      expect(key('session-session-1'), findsNothing);
+      expect(tester.widget<IconButton>(key('expand-/a')).tooltip, '展开会话');
+      await tester.tap(key('expand-/a'));
+      await tester.pumpAndSettle();
       expect(key('session-session-1'), findsOneWidget);
       await enterConfig(tester, 'flavor', 'still-b');
       bridge.startResponse = null;

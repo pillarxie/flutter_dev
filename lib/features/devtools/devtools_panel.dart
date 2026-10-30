@@ -20,11 +20,13 @@ class DevToolsPanel extends StatefulWidget {
     required this.bridge,
     required this.session,
     this.embeddedViewBuilder,
+    this.searchFocus,
   });
 
   final WorkbenchBridge bridge;
   final Session? session;
   final EmbeddedDevToolsBuilder? embeddedViewBuilder;
+  final FocusNode? searchFocus;
 
   @override
   State<DevToolsPanel> createState() => _DevToolsPanelState();
@@ -275,6 +277,7 @@ class _DevToolsPanelState extends State<DevToolsPanel> {
         Expanded(
           child: _module == 'network'
               ? NetworkPanel(
+                  searchFocus: widget.searchFocus,
                   key: ValueKey('devtools-network-${widget.session?.id}'),
                   bridge: widget.bridge,
                   session: widget.session,

@@ -35,6 +35,19 @@ impl OwnedProcess {
         cwd: Option<&Path>,
         env: &HashMap<String, String>,
     ) -> Result<Self> {
+        Self::spawn_with_env_removed(program, args, cwd, env, &[])
+    }
+
+    /// Removes selected inherited variables for tools whose repository context must
+    /// not leak from the process that launched the workbench. Other callers retain
+    /// the normal inherited environment through `spawn`.
+    pub(crate) fn spawn_with_env_removed(
+        program: &Path,
+        args: &[String],
+        cwd: Option<&Path>,
+        env: &HashMap<String, String>,
+        removed_env: &[&str],
+    ) -> Result<Self> {
         let mut command = command(program, args)?;
         command
             .stdin(Stdio::piped())
@@ -42,7 +55,17 @@ impl OwnedProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         configure_environment(&mut command, env)?;
+        for variable in removed_env {
+            command.env_remove(variable);
+        }
         if let Some(cwd) = cwd {
+            #[cfg(windows)]
+            if is_batch_program(program) {
+                command.current_dir(command_path(cwd));
+            } else {
+                command.current_dir(cwd);
+            }
+            #[cfg(not(windows))]
             command.current_dir(cwd);
         }
         #[cfg(unix)]
@@ -57,7 +80,7 @@ impl OwnedProcess {
         #[cfg(windows)]
         // Keep the initial thread suspended until it belongs to the job, so early SDK
         // descendants cannot escape ownership between CreateProcess and job assignment.
-        command.creation_flags(0x00000200 | 0x00000004); // NEW_PROCESS_GROUP | SUSPENDED
+        command.creation_flags(0x00000200 | 0x00000004 | 0x08000000); // NEW_PROCESS_GROUP | SUSPENDED | NO_WINDOW
         let mut child = command
             .spawn()
             .with_context(|| format!("Failed to start {}", program.display()))?;
@@ -135,12 +158,78 @@ impl Drop for OwnedProcess {
     }
 }
 
-fn command(program: &Path, args: &[String]) -> Result<Command> {
-    #[cfg(windows)]
-    if program.extension().is_some_and(|ext| {
+/// Editors are handed off to the user and can outlive the workbench. Success
+/// confirms spawning and no failure observed during the handoff window; it does
+/// not claim that a long-lived GUI has finished opening the requested file.
+/// Keep argument-array execution and Windows batch checks without owning its tree.
+pub(crate) async fn launch_editor(program: &Path, args: &[String]) -> Result<()> {
+    observe_editor_handoff(spawn_editor(program, args)?).await
+}
+
+fn spawn_editor(program: &Path, args: &[String]) -> Result<Child> {
+    let mut command = command(program, args)?;
+    configure_environment(&mut command, &HashMap::new())?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("Failed to start editor {}", program.display()))
+}
+
+async fn observe_editor_handoff(mut child: Child) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let stderr = child.stderr.take();
+    let output = tokio::spawn(async move {
+        let mut captured = Vec::new();
+        if let Some(mut stream) = stderr {
+            let mut buffer = [0u8; 4096];
+            while let Ok(length) = stream.read(&mut buffer).await {
+                if length == 0 {
+                    break;
+                }
+                let remaining = 16384usize.saturating_sub(captured.len());
+                captured.extend_from_slice(&buffer[..length.min(remaining)]);
+            }
+        }
+        captured
+    });
+    match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(result) => {
+            let status = result.context("Wait for editor handoff")?;
+            if !status.success() {
+                let output = tokio::time::timeout(Duration::from_millis(250), output)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "Editor exited unsuccessfully ({status}): {}",
+                    String::from_utf8_lossy(&output).trim()
+                );
+            }
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+                let _ = output.await;
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_batch_program(program: &Path) -> bool {
+    program.extension().is_some_and(|ext| {
         ext.to_string_lossy().eq_ignore_ascii_case("bat")
             || ext.to_string_lossy().eq_ignore_ascii_case("cmd")
-    }) {
+    })
+}
+
+fn command(program: &Path, args: &[String]) -> Result<Command> {
+    #[cfg(windows)]
+    if is_batch_program(program) {
         use std::os::windows::process::CommandExt;
         // cmd performs expansion even inside quotes. Reject expandable shell syntax rather than
         // silently allowing launch arguments to become commands or environment substitutions.
@@ -155,7 +244,7 @@ fn command(program: &Path, args: &[String]) -> Result<Command> {
         }
         let quoted = values
             .iter()
-            .map(|value| format!("\"{value}\""))
+            .map(|value| format!("\"{}\"", command_path(Path::new(value))))
             .collect::<Vec<_>>()
             .join(" ");
         let mut command = Command::new("cmd.exe");
@@ -166,6 +255,27 @@ fn command(program: &Path, args: &[String]) -> Result<Command> {
     let mut command = Command::new(program);
     command.args(args);
     Ok(command)
+}
+
+// Git and cmd.exe do not accept Rust's canonical Windows verbatim paths.
+// Convert external command paths only; filesystem paths and API results retain
+// their canonical representation. Non-path arguments remain unchanged.
+pub(crate) fn command_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if let Some(share) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{share}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\") {
+        let bytes = drive.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return drive.to_owned();
+        }
+    }
+    path.into_owned()
 }
 
 fn configure_environment(command: &mut Command, env: &HashMap<String, String>) -> Result<()> {
@@ -380,10 +490,389 @@ mod windows_job {
     }
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use std::fs;
+    use tokio::io::AsyncReadExt;
+
+    const CONSOLE_REPORT: &str = "FLUTTER_DEV_CONSOLE_PROBE_REPORT";
+    const CONSOLE_STAY_ALIVE: &str = "FLUTTER_DEV_CONSOLE_PROBE_STAY_ALIVE";
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> isize;
+        fn GetConsoleProcessList(processes: *mut u32, count: u32) -> u32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+        fn WaitForSingleObject(handle: isize, milliseconds: u32) -> u32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn IsWindowVisible(window: isize) -> i32;
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ConsoleReport {
+        pid: u32,
+        console_window: isize,
+        console_visible: bool,
+        console_processes: u32,
+    }
+
+    // Executed in a real test-binary subprocess, directly or beneath cmd.exe.
+    // Ordinary suite execution has no report path and does not enter the probe.
+    #[test]
+    fn console_probe_child() {
+        let Some(report) = std::env::var_os(CONSOLE_REPORT) else {
+            return;
+        };
+        let mut processes = [0u32; 16];
+        let console_window = unsafe { GetConsoleWindow() };
+        let console_processes =
+            unsafe { GetConsoleProcessList(processes.as_mut_ptr(), processes.len() as u32) };
+        let console_visible =
+            console_window != 0 && unsafe { IsWindowVisible(console_window) } != 0;
+        fs::write(
+            report,
+            serde_json::json!({
+                "pid": std::process::id(),
+                "console_window": console_window,
+                "console_visible": console_visible,
+                "console_processes": console_processes,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // Windows can retain a headless console with one or more processes even
+        // under CREATE_NO_WINDOW. Its process count does not imply a window.
+        assert_eq!(
+            console_window, 0,
+            "visible={console_visible}, processes={console_processes}"
+        );
+        assert!(!console_visible, "processes={console_processes}");
+        println!("console window={console_window}, visible={console_visible}, processes={console_processes}");
+        println!("console-probe-ok");
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        if std::env::var_os(CONSOLE_STAY_ALIVE).is_some() {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+        std::process::exit(7);
+    }
+
+    fn console_probe_args() -> Vec<String> {
+        [
+            "--exact",
+            "process::windows_tests::console_probe_child",
+            "--nocapture",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    }
+
+    fn console_probe_batch(root: &Path) -> PathBuf {
+        let program = root.join("console child 中文.bat");
+        let executable = command_path(&std::env::current_exe().unwrap());
+        fs::write(&program, format!(
+            "@echo off\r\n\"{executable}\" --exact process::windows_tests::console_probe_child --nocapture\r\nexit /b %errorlevel%\r\n"
+        )).unwrap();
+        program
+    }
+
+    async fn console_report(path: &Path) -> ConsoleReport {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Ok(content) = fs::read_to_string(path) {
+                    if let Ok(report) = serde_json::from_str(&content) {
+                        return report;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("console probe did not report readiness")
+    }
+
+    #[tokio::test]
+    async fn background_executable_and_batch_descendant_have_no_console() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let batch = console_probe_batch(root.path());
+        for (index, program) in [&executable, &batch].into_iter().enumerate() {
+            let report_path = root.path().join(format!("report-{index}.json"));
+            let environment = HashMap::from([(
+                CONSOLE_REPORT.into(),
+                report_path.to_string_lossy().into_owned(),
+            )]);
+            let mut process = OwnedProcess::spawn(
+                program,
+                &console_probe_args(),
+                Some(root.path()),
+                &environment,
+            )
+            .unwrap();
+            let primary_pid = process.id();
+            process.stdin.take();
+            let mut stdout = process.stdout.take().unwrap();
+            let mut stderr = process.stderr.take().unwrap();
+            let (output, errors, status) = tokio::time::timeout(Duration::from_secs(20), async {
+                tokio::try_join!(
+                    async {
+                        let mut output = String::new();
+                        stdout.read_to_string(&mut output).await?;
+                        Ok::<_, std::io::Error>(output)
+                    },
+                    async {
+                        let mut output = String::new();
+                        stderr.read_to_string(&mut output).await?;
+                        Ok::<_, std::io::Error>(output)
+                    },
+                    async { process.wait().await.map_err(std::io::Error::other) },
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                status.code(),
+                Some(7),
+                "{}: stdout={output}; stderr={errors}",
+                program.display()
+            );
+            assert!(output.contains("console-probe-ok"), "{output}");
+            let report = console_report(&report_path).await;
+            assert_eq!(
+                report.console_window, 0,
+                "processes={}",
+                report.console_processes
+            );
+            assert!(
+                !report.console_visible,
+                "processes={}",
+                report.console_processes
+            );
+            if index == 1 {
+                assert_ne!(
+                    Some(report.pid),
+                    primary_pid,
+                    "probe must be a batch descendant"
+                );
+            } else {
+                assert_eq!(Some(report.pid), primary_pid);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hidden_batch_termination_cleans_descendants_and_preserves_other_jobs() {
+        struct ProcessHandle(isize);
+        impl Drop for ProcessHandle {
+            fn drop(&mut self) {
+                unsafe {
+                    CloseHandle(self.0);
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let report_path = root.path().join("owned.json");
+        let environment = HashMap::from([
+            (
+                CONSOLE_REPORT.into(),
+                report_path.to_string_lossy().into_owned(),
+            ),
+            (CONSOLE_STAY_ALIVE.into(), "1".into()),
+        ]);
+        let mut owned = OwnedProcess::spawn(
+            &console_probe_batch(root.path()),
+            &[],
+            Some(root.path()),
+            &environment,
+        )
+        .unwrap();
+        let descendant = console_report(&report_path).await;
+        assert_eq!(
+            descendant.console_window, 0,
+            "processes={}",
+            descendant.console_processes
+        );
+        assert!(!descendant.console_visible);
+        assert_ne!(Some(descendant.pid), owned.id());
+        let handle = ProcessHandle(unsafe {
+            OpenProcess(0x00100000 | 0x1000, 0, descendant.pid) // SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        });
+        assert_ne!(handle.0, 0);
+
+        let unrelated_report = root.path().join("unrelated.json");
+        let unrelated_environment = HashMap::from([
+            (
+                CONSOLE_REPORT.into(),
+                unrelated_report.to_string_lossy().into_owned(),
+            ),
+            (CONSOLE_STAY_ALIVE.into(), "1".into()),
+        ]);
+        let mut unrelated = OwnedProcess::spawn(
+            &std::env::current_exe().unwrap(),
+            &console_probe_args(),
+            None,
+            &unrelated_environment,
+        )
+        .unwrap();
+        console_report(&unrelated_report).await;
+        owned.terminate(Duration::from_millis(100)).await.unwrap();
+        assert_eq!(unsafe { WaitForSingleObject(handle.0, 5000) }, 0);
+        assert!(unrelated.child.try_wait().unwrap().is_none());
+        unrelated
+            .terminate(Duration::from_millis(100))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn canonical_batch_paths_and_working_directory_preserve_output_and_exit_status() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("batch 空格");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("relative.txt"), "fixture").unwrap();
+        let input = root.join("参数 file.txt");
+        fs::write(&input, "fixture").unwrap();
+        let cwd = root.canonicalize().unwrap();
+        let args = [
+            input.canonicalize().unwrap().to_string_lossy().into_owned(),
+            "literal/name=value".into(),
+        ];
+        for extension in ["bat", "cmd"] {
+            let program = root.join(format!("probe script.{extension}"));
+            fs::write(
+                &program,
+                "@echo off\r\nif not exist \"%~1\" exit /b 21\r\nif not exist \"relative.txt\" exit /b 22\r\necho path-ok\r\necho %~2\r\nexit /b 7\r\n",
+            )
+            .unwrap();
+            let mut process = OwnedProcess::spawn(
+                &program.canonicalize().unwrap(),
+                &args,
+                Some(&cwd),
+                &HashMap::new(),
+            )
+            .unwrap();
+            process.stdin.take();
+            let mut stdout = process.stdout.take().unwrap();
+            let (output, status) = tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::try_join!(
+                    async {
+                        let mut output = String::new();
+                        stdout.read_to_string(&mut output).await?;
+                        Ok::<_, std::io::Error>(output)
+                    },
+                    async { process.wait().await.map_err(std::io::Error::other) },
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(status.code(), Some(7));
+            assert_eq!(
+                output.lines().collect::<Vec<_>>(),
+                ["path-ok", "literal/name=value"]
+            );
+        }
+    }
+
+    #[test]
+    fn batch_commands_still_reject_shell_expansion_and_metacharacters() {
+        let program = Path::new(r"\\?\C:\SDK folder\flutter.bat");
+        for character in ['"', '%', '!', '\r', '\n', '&', '|', '<', '>', '^'] {
+            let error = command(program, &[format!("unsafe{character}value")])
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("unsupported shell characters"));
+        }
+        assert!(command(Path::new(r"C:\unsafe&folder\flutter.bat"), &[]).is_err());
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    // The interpreter can take several seconds to start under a parallel full
+    // suite. Readiness is an explicit fixture condition, independent of the
+    // production handoff observation window.
+    async fn editor_ready(child: &mut Child, pid_file: &Path) -> i32 {
+        let ready = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(pid_file) {
+                    if let Ok(pid) = pid.parse::<i32>() {
+                        return pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if ready.is_err() {
+            let _ = child.kill().await;
+        }
+        ready.expect("editor fixture did not report readiness")
+    }
+
+    struct FixtureEditor(i32);
+    impl Drop for FixtureEditor {
+        fn drop(&mut self) {
+            // Only the single process spawned by the fixture is addressed.
+            unsafe {
+                libc::kill(self.0, libc::SIGTERM);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn editor_handoff_reports_command_failure_without_shell_interpolation() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("editor");
+        let pid_file = root.path().join("editor.pid");
+        std::fs::write(&program,
+            "#!/usr/bin/env python3\nimport os,sys\nopen(sys.argv[1],'w').write(str(os.getpid()))\nprint(sys.argv[2],file=sys.stderr)\nsys.exit(7)\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = spawn_editor(
+            &program,
+            &[
+                pid_file.to_string_lossy().into_owned(),
+                "literal $(do-not-run)".into(),
+            ],
+        )
+        .unwrap();
+        editor_ready(&mut child, &pid_file).await;
+        // Waiting for this quick-exit fixture, rather than guessing when Python
+        // has started, makes the unsuccessful-exit branch deterministic.
+        let status = tokio::time::timeout(Duration::from_secs(15), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.code(), Some(7));
+        let error = observe_editor_handoff(child).await.unwrap_err();
+        assert!(error.to_string().contains("literal $(do-not-run)"));
+        assert!(error.to_string().contains("7"));
+    }
+
+    #[tokio::test]
+    async fn long_lived_editor_is_handed_off_without_terminating_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("editor");
+        let pid_file = root.path().join("editor.pid");
+        std::fs::write(&program, "#!/usr/bin/env python3\nimport os,sys,time\nopen(sys.argv[1],'w').write(str(os.getpid()))\ntime.sleep(60)\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut child = spawn_editor(&program, &[pid_file.to_string_lossy().into_owned()]).unwrap();
+        let pid = editor_ready(&mut child, &pid_file).await;
+        let _fixture = FixtureEditor(pid);
+        observe_editor_handoff(child).await.unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+    }
 
     #[test]
     fn gui_path_adds_installed_tools_after_inherited_paths() {
