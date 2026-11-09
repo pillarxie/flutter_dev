@@ -14,10 +14,14 @@ const _session = Session(
   deviceId: 'macos',
   mode: 'debug',
 );
+const _clearTooltip = '清空当前会话日志';
 
 class _LogBridge extends WorkbenchBridge {
   final controller = StreamController<WorkbenchEvent>.broadcast(sync: true);
   List<LogEntry> logs = [];
+  int clearedThroughId = 0;
+  final clearRequests = <String>[];
+  Future<void> Function()? clearHandler;
   @override
   Stream<WorkbenchEvent> get events => controller.stream;
   @override
@@ -25,6 +29,15 @@ class _LogBridge extends WorkbenchBridge {
   final opened = <({String projectPath, String path, int line, int column})>[];
   bool failOpen = false;
   Future<LogPage> Function(String, int, int, String)? handler;
+
+  @override
+  Future<void> clearLogs(String id) async {
+    clearRequests.add(id);
+    await clearHandler?.call();
+    if (logs.isNotEmpty) clearedThroughId = logs.last.id;
+    logs = [];
+  }
+
   @override
   Future<void> openSourceLocation(
     String projectPath,
@@ -47,34 +60,25 @@ class _LogBridge extends WorkbenchBridge {
     int afterId = 0,
     int limit = 200,
     String query = '',
-  }) async => handler == null
-      ? Future.value(
-          LogPage(
-            entries: logs
-                .where(
-                  (entry) => entry.id > afterId && entry.text.contains(query),
-                )
-                .take(limit)
-                .toList(),
-            nextAfterId:
-                logs
-                    .where(
-                      (entry) =>
-                          entry.id > afterId && entry.text.contains(query),
-                    )
-                    .take(limit)
-                    .lastOrNull
-                    ?.id ??
-                afterId,
-          ),
-        )
-      : handler!(id, afterId, limit, query);
+  }) async {
+    final read = handler;
+    if (read != null) return read(id, afterId, limit, query);
+    final entries = logs
+        .where((entry) => entry.id > afterId && entry.text.contains(query))
+        .take(limit)
+        .toList();
+    return LogPage(
+      entries: entries,
+      nextAfterId: entries.lastOrNull?.id ?? afterId,
+      clearedThroughId: clearedThroughId,
+    );
+  }
 }
 
 Future<void> _mount(
   WidgetTester tester,
   _LogBridge bridge, {
-  Session session = _session,
+  Session? session = _session,
   Size size = const Size(800, 700),
   Brightness brightness = Brightness.light,
 }) async {
@@ -319,6 +323,154 @@ void main() {
     },
   );
 
+  testWidgets('clear is disabled without a selected session', (tester) async {
+    final bridge = _LogBridge();
+    addTearDown(bridge.controller.close);
+    await _mount(tester, bridge, session: null);
+    expect(
+      tester
+          .widget<IconButton>(
+            find.widgetWithIcon(IconButton, Icons.delete_outline),
+          )
+          .onPressed,
+      isNull,
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('clear ignores a pending page and keeps current filters', (
+    tester,
+  ) async {
+    final bridge = _LogBridge()
+      ..logs = const [
+        LogEntry(id: 1, category: 'stderr', text: 'previous batch'),
+      ];
+    addTearDown(bridge.controller.close);
+    await _mount(tester, bridge);
+    await tester.enterText(find.byType(TextField), 'batch');
+    await tester.tap(find.byKey(const Key('log-errors-filter')));
+    await tester.tap(find.byTooltip('暂停滚动（继续接收日志）'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('previous batch'), findsOneWidget);
+
+    final pending = Completer<LogPage>();
+    const stale = LogEntry(id: 2, category: 'stderr', text: 'stale batch');
+    bridge.logs = [...bridge.logs, stale];
+    int? pendingCursor;
+    bridge.handler = (_, afterId, _, _) {
+      pendingCursor = afterId;
+      return pending.future;
+    };
+    bridge.controller.add(
+      const WorkbenchEvent(kind: 'logs', sessionId: 'one', generation: 1),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(pendingCursor, 1);
+    await tester.tap(find.byTooltip(_clearTooltip));
+    await tester.pump();
+    expect(bridge.clearRequests, ['one']);
+    expect(find.text('previous batch'), findsNothing);
+
+    bridge.handler = null;
+    bridge.logs = const [
+      LogEntry(id: 3, category: 'stderr', text: 'fresh batch'),
+      LogEntry(id: 4, category: 'stdout', text: 'excluded batch'),
+      LogEntry(id: 5, category: 'stderr', text: 'excluded message'),
+    ];
+    pending.complete(const LogPage(entries: [stale], nextAfterId: 2));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('stale batch'), findsNothing);
+    expect(find.text('fresh batch'), findsOneWidget);
+    expect(find.text('excluded batch'), findsNothing);
+    expect(find.text('excluded message'), findsNothing);
+    expect(find.byTooltip('恢复跟随输出'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('重新读取日志'));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.text('previous batch'), findsNothing);
+    expect(find.text('fresh batch'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('clear failure preserves logs and allows retry', (tester) async {
+    final bridge = _LogBridge()
+      ..logs = const [LogEntry(id: 1, category: 'stdout', text: 'keep me')]
+      ..clearHandler = () async => throw StateError('core unavailable');
+    addTearDown(bridge.controller.close);
+    await _mount(tester, bridge);
+    await tester.tap(find.byTooltip(_clearTooltip));
+    await tester.pump();
+    expect(find.textContaining('清空日志失败'), findsOneWidget);
+    expect(find.text('keep me'), findsOneWidget);
+
+    bridge.clearHandler = null;
+    await tester.tap(find.byTooltip(_clearTooltip));
+    await tester.pump();
+    expect(bridge.clearRequests, ['one', 'one']);
+    expect(find.textContaining('清空日志失败'), findsNothing);
+    expect(find.text('keep me'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('clear watermark prunes old visible entries on a log event', (
+    tester,
+  ) async {
+    final bridge = _LogBridge()
+      ..logs = const [LogEntry(id: 1, category: 'stdout', text: 'old output')];
+    addTearDown(bridge.controller.close);
+    await _mount(tester, bridge);
+    expect(find.text('old output'), findsOneWidget);
+
+    await bridge.clearLogs('one');
+    bridge.logs = const [
+      LogEntry(id: 2, category: 'stdout', text: 'new output'),
+    ];
+    bridge.controller.add(
+      const WorkbenchEvent(kind: 'logs', sessionId: 'one', generation: 1),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('old output'), findsNothing);
+    expect(find.text('new output'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets(
+    'resuming follow reaches wrapped tail without another log event',
+    (tester) async {
+      final bridge = _LogBridge();
+      addTearDown(bridge.controller.close);
+      await _mount(tester, bridge);
+      await tester.tap(find.byTooltip('暂停滚动（继续接收日志）'));
+
+      final wrapped = 'wrapped tail ' * 70;
+      bridge.logs = [
+        for (var i = 1; i <= 60; i++)
+          LogEntry(
+            id: i,
+            category: 'stdout',
+            text: i <= 35 ? 'row $i' : 'row $i $wrapped',
+          ),
+      ];
+      bridge.controller.add(
+        const WorkbenchEvent(kind: 'logs', sessionId: 'one', generation: 1),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      final position = tester
+          .widget<ListView>(find.byType(ListView))
+          .controller!
+          .position;
+      expect(position.pixels, position.minScrollExtent);
+      expect(find.text(bridge.logs.last.text), findsNothing);
+
+      await tester.tap(find.byTooltip('恢复跟随输出'));
+      await tester.pumpAndSettle();
+      expect(position.pixels, closeTo(position.maxScrollExtent, 1));
+      expect(find.text(bridge.logs.last.text), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   for (final brightness in Brightness.values) {
     testWidgets(
       'log controls fit narrow ${brightness.name} view and expose pause state',
@@ -331,6 +483,7 @@ void main() {
           size: const Size(340, 620),
           brightness: brightness,
         );
+        expect(find.byTooltip(_clearTooltip), findsOneWidget);
         await tester.tap(find.byTooltip('暂停滚动（继续接收日志）'));
         await tester.pump();
         expect(find.text('已暂停滚动 · 继续接收日志'), findsOneWidget);

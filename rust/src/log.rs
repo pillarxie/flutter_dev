@@ -13,6 +13,7 @@ pub struct LogPage {
     pub entries: Vec<LogEntry>,
     pub next_after_id: Option<u64>,
     pub dropped_before_id: Option<u64>,
+    pub cleared_through_id: Option<u64>,
 }
 
 pub struct LogBuffer {
@@ -22,6 +23,7 @@ pub struct LogBuffer {
     bytes: usize,
     next_id: u64,
     dropped_before_id: Option<u64>,
+    cleared_through_id: Option<u64>,
 }
 
 impl LogBuffer {
@@ -37,7 +39,17 @@ impl LogBuffer {
             bytes: 0,
             next_id: 1,
             dropped_before_id: None,
+            cleared_through_id: None,
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+        self.dropped_before_id = None;
+        // Preserve the ID sequence for readers that already hold a cursor.
+        let latest = self.latest_id();
+        self.cleared_through_id = (latest > 0).then_some(latest);
     }
 
     pub fn push(&mut self, category: &str, text: &str) -> u64 {
@@ -80,6 +92,7 @@ impl LogBuffer {
             next_after_id: entries.last().map(|entry| entry.id),
             entries,
             dropped_before_id: self.dropped_before_id,
+            cleared_through_id: self.cleared_through_id,
         }
     }
 }
@@ -113,5 +126,29 @@ mod tests {
         log.push("o", "你好世界");
         let page = log.query(None, 10, Some("你好"));
         assert_eq!(page.entries[0].text, "你好");
+    }
+
+    #[test]
+    fn clear_frees_capacity_and_preserves_the_monotonic_cursor() {
+        let mut log = LogBuffer::new(10, 5);
+        log.push("o", "old\nlast");
+        let before = log.query(None, 10, None);
+        assert_eq!(before.dropped_before_id, Some(2));
+        assert_eq!(before.cleared_through_id, None);
+        assert_eq!(before.next_after_id, Some(2));
+
+        log.clear();
+        log.clear();
+        let empty = log.query(None, 10, Some("last"));
+        assert!(empty.entries.is_empty());
+        assert_eq!(empty.dropped_before_id, None);
+        assert_eq!(empty.cleared_through_id, before.next_after_id);
+        assert_eq!(log.latest_id(), 2);
+
+        log.push("o", "next");
+        let new = log.query(before.next_after_id, 10, None);
+        assert_eq!(new.entries[0].text, "next");
+        assert_eq!(new.next_after_id, Some(3));
+        assert_eq!(new.cleared_through_id, before.next_after_id);
     }
 }

@@ -482,6 +482,12 @@ pub async fn read_logs(
     );
     Ok(page)
 }
+pub async fn clear_logs(session_id: String) -> Result<()> {
+    let session = session(&session_id).await?;
+    session.logs.lock().await.clear();
+    session.emit(CoreEventKind::OutputAvailable, None).await;
+    Ok(())
+}
 pub async fn subscribe_events(sink: crate::frb_generated::StreamSink<CoreEvent>) -> Result<()> {
     let core = core();
     let mut cancelled = core.subscriptions.subscribe();

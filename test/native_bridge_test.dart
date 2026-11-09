@@ -302,21 +302,22 @@ void main() {
         );
         await api.stopBuild(buildId: startedBuild.id);
 
+        final fallbackConfiguration = RunConfiguration(
+          projectPath: directory.path,
+          sdkPath: '${directory.path}/missing-sdk',
+          program: 'lib/main.dart',
+          deviceId: 'bridge-test',
+          mode: RunMode.debug,
+          noDebug: false,
+          attachUri: null,
+          env: const [],
+          toolArgs: const [],
+          args: const [],
+          flavor: null,
+          dartDefines: const [],
+        );
         final fallbackSession = await api.startSession(
-          config: RunConfiguration(
-            projectPath: directory.path,
-            sdkPath: '${directory.path}/missing-sdk',
-            program: 'lib/main.dart',
-            deviceId: 'bridge-test',
-            mode: RunMode.debug,
-            noDebug: false,
-            attachUri: null,
-            env: const [],
-            toolArgs: const [],
-            args: const [],
-            flavor: null,
-            dartDefines: const [],
-          ),
+          config: fallbackConfiguration,
         );
         final resolvedSession = await waitForTerminal(
           fallbackSession.sessionId,
@@ -333,6 +334,35 @@ void main() {
           fallbackLogs.entries.any((entry) => entry.category == 'warning'),
           isTrue,
         );
+        final otherSession = await api.startSession(
+          config: fallbackConfiguration,
+        );
+        await waitForTerminal(otherSession.sessionId);
+        await api.clearLogs(sessionId: fallbackSession.sessionId);
+        final clearedLogs = await api.readLogs(
+          sessionId: fallbackSession.sessionId,
+          afterId: 0,
+          limit: 100,
+          query: '',
+        );
+        expect(clearedLogs.entries, isEmpty);
+        expect(
+          clearedLogs.clearedThroughId,
+          greaterThanOrEqualTo(fallbackLogs.entries.last.id),
+        );
+        final retainedSessionLogs = await api.readLogs(
+          sessionId: otherSession.sessionId,
+          afterId: 0,
+          limit: 100,
+          query: 'global SDK',
+        );
+        expect(retainedSessionLogs.entries, fallbackLogs.entries);
+        final retainedBuildLogs = await api.readBuildLogs(
+          buildId: startedBuild.id,
+          afterId: 0,
+          limit: 100,
+        );
+        expect(retainedBuildLogs.entries, buildLogs.entries);
         await api.shutdownCore();
         expect(await api.listBuilds(), isEmpty);
         await api.setDefaultSdk(path: null);

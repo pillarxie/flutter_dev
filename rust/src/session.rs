@@ -177,6 +177,22 @@ while True:
     }
 
     #[test]
+    fn adapter_output_preserves_intentional_blank_lines_without_an_extra_final_line() {
+        let mut logs = LogBuffer::new(100, 4096);
+        for output in ["first\r\n\r\nsecond\r\n", "\n", "last", ""] {
+            record_adapter_output(&mut logs, &json!({"output":output}), false);
+        }
+        record_adapter_output(&mut logs, &json!({}), false);
+        let page = logs.query(None, 100, None);
+        let lines: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect();
+        assert_eq!(lines, ["first", "", "second", "", "last"]);
+    }
+
+    #[test]
     fn ios_ports_match_for_simulator_discovery_and_keep_dds_separate() {
         let mut args = vec![
             "--flavor".into(),
@@ -981,22 +997,23 @@ impl ProtocolPeer {
 
 fn record_adapter_output(logs: &mut LogBuffer, body: &Value, isolate_dart_output: bool) {
     let category = body["category"].as_str().unwrap_or("stdout");
-    let text = body["output"]
+    let Some(text) = body["output"]
         .as_str()
         .or(body["message"].as_str())
-        .unwrap_or("");
-    if isolate_dart_output {
+        .filter(|text| !text.is_empty())
+    else {
+        return;
+    };
+    if isolate_dart_output && matches!(category, "stdout" | "console") {
         // iOS device logs are filtered by executable name (usually Runner),
         // not by process. Their Dart output may belong to another application.
         // Multiline continuation lines have no ownership or prefix. The SDK
         // labels stdout as console before appStarted, so both are unsafe.
         // Tool errors use stderr; startup status comes from DAP progress.
-        if category != "stdout" && category != "console" {
-            logs.push(category, text);
-        }
-    } else {
-        logs.push(category, text);
+        return;
     }
+    // A trailing line separator completes the final line without adding a row.
+    logs.push(category, text.strip_suffix('\n').unwrap_or(text));
 }
 
 fn ios_vm_service_arguments(args: &mut Vec<String>) -> Result<crate::vm_logs::ReservedVmPort> {

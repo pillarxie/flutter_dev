@@ -206,9 +206,10 @@ class LogPage {
     required this.entries,
     required this.nextAfterId,
     this.droppedBeforeId = 0,
+    this.clearedThroughId = 0,
   });
   final List<LogEntry> entries;
-  final int nextAfterId, droppedBeforeId;
+  final int nextAfterId, droppedBeforeId, clearedThroughId;
 }
 
 class WorkbenchEvent {
@@ -291,6 +292,8 @@ abstract class WorkbenchBridge {
     int limit = 200,
     String query = '',
   });
+  Future<void> clearLogs(String id) =>
+      Future.error(UnsupportedError('当前桥接不支持清空日志'));
   Future<Map<String, dynamic>> debuggerRequest(
     String id,
     String command,

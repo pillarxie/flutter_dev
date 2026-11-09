@@ -547,8 +547,12 @@ class NativeWorkbenchBridge extends WorkbenchBridge {
       ],
       nextAfterId: page.nextAfterId ?? afterId,
       droppedBeforeId: page.droppedBeforeId ?? 0,
+      clearedThroughId: page.clearedThroughId ?? 0,
     );
   }
+
+  @override
+  Future<void> clearLogs(String id) => api.clearLogs(sessionId: id);
 
   @override
   Future<String> openDevTools(String sessionId, String module) async =>

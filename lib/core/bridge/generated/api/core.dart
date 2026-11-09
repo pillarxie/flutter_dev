@@ -192,6 +192,9 @@ Future<LogPage> readLogs({
   query: query,
 );
 
+Future<void> clearLogs({required String sessionId}) =>
+    RustLib.instance.api.crateApiCoreClearLogs(sessionId: sessionId);
+
 Stream<CoreEvent> subscribeEvents() =>
     RustLib.instance.api.crateApiCoreSubscribeEvents();
 

@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1855708697;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 241813461;
 
 // Section: executor
 
@@ -144,6 +144,42 @@ fn wire__crate__api__core__clear_build_cache_impl(
                 transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
                     (move || async move {
                         let output_ok = crate::api::core::clear_build_cache().await?;
+                        Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__core__clear_logs_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "clear_logs",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let output_ok = crate::api::core::clear_logs(api_session_id).await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -2438,10 +2474,12 @@ impl SseDecode for crate::log::LogPage {
         let mut var_entries = <Vec<crate::log::LogEntry>>::sse_decode(deserializer);
         let mut var_nextAfterId = <Option<u64>>::sse_decode(deserializer);
         let mut var_droppedBeforeId = <Option<u64>>::sse_decode(deserializer);
+        let mut var_clearedThroughId = <Option<u64>>::sse_decode(deserializer);
         return crate::log::LogPage {
             entries: var_entries,
             next_after_id: var_nextAfterId,
             dropped_before_id: var_droppedBeforeId,
+            cleared_through_id: var_clearedThroughId,
         };
     }
 }
@@ -2909,59 +2947,60 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         3 => wire__crate__api__core__clear_build_cache_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__core__close_devtools_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__core__debug_action_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__core__discover_projects_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__core__discover_test_files_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__core__evaluate_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__core__get_app_settings_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__core__get_build_presets_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__core__hot_reload_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__core__hot_restart_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__core__launch_emulator_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__core__list_builds_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__core__list_devices_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__core__list_emulators_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__core__list_test_runs_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__core__network_request_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__core__open_build_output_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__core__open_devtools_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__core__open_source_location_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__core__project_git_info_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__core__read_build_logs_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__core__read_build_version_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__core__read_logs_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__core__read_source_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__core__read_test_logs_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__core__resolve_sdk_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__core__scopes_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__core__session_snapshots_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__core__set_breakpoints_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__core__set_build_presets_impl(port, ptr, rust_vec_len, data_len),
-        33 => wire__crate__api__core__set_default_sdk_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__core__set_theme_mode_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__core__set_workspace_preferences_impl(
+        4 => wire__crate__api__core__clear_logs_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__core__close_devtools_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__core__debug_action_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__core__discover_projects_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__core__discover_test_files_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__core__evaluate_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__core__get_app_settings_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__core__get_build_presets_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__core__hot_reload_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__core__hot_restart_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__core__launch_emulator_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__core__list_builds_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__core__list_devices_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__core__list_emulators_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__core__list_test_runs_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__core__network_request_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__core__open_build_output_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__core__open_devtools_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__core__open_source_location_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__core__project_git_info_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__core__read_build_logs_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__core__read_build_version_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__core__read_logs_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__core__read_source_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__core__read_test_logs_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__core__resolve_sdk_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__core__scopes_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__core__session_snapshots_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__core__set_breakpoints_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__core__set_build_presets_impl(port, ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__core__set_default_sdk_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__core__set_theme_mode_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__core__set_workspace_preferences_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        36 => {
+        37 => {
             wire__crate__api__core__set_workspace_projects_impl(port, ptr, rust_vec_len, data_len)
         }
-        37 => wire__crate__api__core__shutdown_core_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__core__stack_trace_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__core__start_build_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__core__start_session_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__core__start_test_run_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__core__stop_build_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__core__stop_session_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__core__stop_test_run_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__core__subscribe_events_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__core__switch_project_branch_impl(port, ptr, rust_vec_len, data_len),
-        47 => wire__crate__api__core__test_run_snapshot_impl(port, ptr, rust_vec_len, data_len),
-        48 => wire__crate__api__core__threads_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__core__variables_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__core__shutdown_core_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__core__stack_trace_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__core__start_build_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__core__start_session_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__core__start_test_run_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__core__stop_build_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__core__stop_session_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__core__stop_test_run_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__core__subscribe_events_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__core__switch_project_branch_impl(port, ptr, rust_vec_len, data_len),
+        48 => wire__crate__api__core__test_run_snapshot_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__core__threads_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__core__variables_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -3292,6 +3331,7 @@ impl flutter_rust_bridge::IntoDart for crate::log::LogPage {
             self.entries.into_into_dart().into_dart(),
             self.next_after_id.into_into_dart().into_dart(),
             self.dropped_before_id.into_into_dart().into_dart(),
+            self.cleared_through_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -4118,6 +4158,7 @@ impl SseEncode for crate::log::LogPage {
         <Vec<crate::log::LogEntry>>::sse_encode(self.entries, serializer);
         <Option<u64>>::sse_encode(self.next_after_id, serializer);
         <Option<u64>>::sse_encode(self.dropped_before_id, serializer);
+        <Option<u64>>::sse_encode(self.cleared_through_id, serializer);
     }
 }
 

@@ -70,6 +70,8 @@ class _LogPanelState extends State<LogPanel> {
   int _cursor = 0, _revision = 0, _dropped = 0;
   int _generation = 0, _sequence = -1;
   bool _loading = false, _pending = false, _follow = true, _errorsOnly = false;
+  Object? _clearRequest;
+  String? _clearError;
   String? _sourceError;
   String? _error;
 
@@ -83,12 +85,11 @@ class _LogPanelState extends State<LogPanel> {
           (e.generation == _generation && e.sequence <= _sequence)) {
         return;
       }
-      if (e.generation > _generation) _reset();
+      if (e.generation > _generation) setState(_resetSession);
       _generation = e.generation;
       _sequence = e.sequence;
       _schedule();
     });
-    _query.addListener(() => _schedule(reset: true));
     _schedule();
   }
 
@@ -99,9 +100,15 @@ class _LogPanelState extends State<LogPanel> {
         oldWidget.session?.generation != widget.session?.generation) {
       _generation = widget.session?.generation ?? 0;
       _sequence = -1;
-      _reset();
+      _resetSession();
       _schedule();
     }
+  }
+
+  void _resetSession() {
+    _clearRequest = null;
+    _clearError = null;
+    _reset();
   }
 
   void _reset() {
@@ -116,10 +123,14 @@ class _LogPanelState extends State<LogPanel> {
   void _schedule({bool reset = false}) {
     if (reset) {
       setState(_reset);
+      _timer?.cancel();
+      _timer = null;
     }
     _pending = true;
-    _timer?.cancel();
-    _timer = Timer(Duration(milliseconds: reset ? 250 : 80), _load);
+    _timer ??= Timer(Duration(milliseconds: reset ? 250 : 80), () {
+      _timer = null;
+      _load();
+    });
   }
 
   Future<void> _load() async {
@@ -135,11 +146,24 @@ class _LogPanelState extends State<LogPanel> {
         query: _query.text.trim(),
       );
       if (!mounted || revision != _revision) return;
+      _cursor = page.nextAfterId;
+      if (page.entries.length == 200) _pending = true;
+      final added = _errorsOnly
+          ? page.entries.where(_isError).toList()
+          : page.entries;
+      final cleared =
+          _entries.isNotEmpty && _entries.first.id <= page.clearedThroughId;
+      if (added.isEmpty &&
+          !cleared &&
+          _dropped == page.droppedBeforeId &&
+          _error == null) {
+        return;
+      }
       setState(() {
-        _entries.addAll(
-          page.entries.where((entry) => !_errorsOnly || _isError(entry)),
-        );
-        _cursor = page.nextAfterId;
+        if (cleared) {
+          _entries.removeWhere((entry) => entry.id <= page.clearedThroughId);
+        }
+        _entries.addAll(added);
         _dropped = page.droppedBeforeId;
         // A display window, independent from the core's bounded retention.
         if (_entries.length > 1000) {
@@ -154,22 +178,57 @@ class _LogPanelState extends State<LogPanel> {
         }
         _error = null;
       });
-      if (page.entries.length == 200) _pending = true;
-      if (_follow) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted &&
-              revision == _revision &&
-              _follow &&
-              _scroll.hasClients) {
-            _scroll.jumpTo(_scroll.position.maxScrollExtent);
-          }
-        });
-      }
+      if (added.isNotEmpty) _scrollToLatest();
     } catch (e) {
       if (mounted && revision == _revision) setState(() => _error = '$e');
     } finally {
       _loading = false;
       if (_pending && mounted) _schedule();
+    }
+  }
+
+  void _scrollToLatest() {
+    if (!_follow) return;
+    final revision = _revision;
+    void scroll(Duration _) {
+      if (!mounted ||
+          revision != _revision ||
+          !_follow ||
+          !_scroll.hasClients) {
+        return;
+      }
+      final position = _scroll.position;
+      final end = position.maxScrollExtent;
+      if (position.pixels == end) return;
+      position.jumpTo(end);
+      // The lazy list estimates its extent until it lays out the last rows.
+      WidgetsBinding.instance.addPostFrameCallback(scroll);
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback(scroll);
+  }
+
+  Future<void> _clearLogs() async {
+    final session = widget.session;
+    if (session == null || _clearRequest != null) return;
+    final request = Object();
+    setState(() {
+      _clearRequest = request;
+      _clearError = null;
+    });
+    try {
+      await widget.bridge.clearLogs(session.id);
+      if (!mounted || _clearRequest != request) return;
+      setState(_reset);
+      _schedule();
+    } catch (error) {
+      if (mounted && _clearRequest == request) {
+        setState(() => _clearError = '清空日志失败：$error');
+      }
+    } finally {
+      if (mounted && _clearRequest == request) {
+        setState(() => _clearRequest = null);
+      }
     }
   }
 
@@ -207,6 +266,7 @@ class _LogPanelState extends State<LogPanel> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final session = widget.session;
+    final errorMessage = _clearError ?? session?.error ?? _error;
     final stateLabel = switch (session?.state) {
       'running' => '运行中',
       'paused' => '已暂停',
@@ -231,6 +291,7 @@ class _LogPanelState extends State<LogPanel> {
                         child: TextField(
                           controller: _query,
                           focusNode: widget.searchFocus,
+                          onChanged: (_) => _schedule(reset: true),
                           decoration: const InputDecoration(
                             prefixIcon: Icon(Icons.search, size: 19),
                             hintText: '搜索日志内容…',
@@ -240,7 +301,10 @@ class _LogPanelState extends State<LogPanel> {
                       const SizedBox(width: 8),
                       IconButton(
                         tooltip: _follow ? '暂停滚动（继续接收日志）' : '恢复跟随输出',
-                        onPressed: () => setState(() => _follow = !_follow),
+                        onPressed: () {
+                          setState(() => _follow = !_follow);
+                          _scrollToLatest();
+                        },
                         color: _follow
                             ? colors.primary
                             : colors.onSurfaceVariant,
@@ -292,6 +356,20 @@ class _LogPanelState extends State<LogPanel> {
                           ),
                         ),
                       ),
+                      IconButton.outlined(
+                        tooltip: '清空当前会话日志',
+                        onPressed: session == null || _clearRequest != null
+                            ? null
+                            : _clearLogs,
+                        icon: _clearRequest == null
+                            ? const Icon(Icons.delete_outline, size: 19)
+                            : const SizedBox.square(
+                                dimension: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              ),
+                      ),
                     ],
                   ),
                 ],
@@ -305,13 +383,13 @@ class _LogPanelState extends State<LogPanel> {
                   style: TextStyle(color: colors.error),
                 ),
               ),
-            if (session?.error != null || _error != null)
+            if (errorMessage != null)
               Padding(
                 padding: EdgeInsets.symmetric(horizontal: padding, vertical: 8),
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: SelectableText(
-                    session?.error ?? _error!,
+                    errorMessage,
                     style: TextStyle(color: colors.error, height: 1.6),
                   ),
                 ),
@@ -331,7 +409,11 @@ class _LogPanelState extends State<LogPanel> {
                           ),
                           const SizedBox(height: 14),
                           Text(
-                            session == null ? '等待第一个会话' : '暂时没有匹配的日志',
+                            session == null
+                                ? '等待第一个会话'
+                                : _query.text.trim().isNotEmpty || _errorsOnly
+                                ? '暂时没有匹配的日志'
+                                : '暂无日志输出',
                             style: TextStyle(color: colors.onSurfaceVariant),
                           ),
                           if (session == null)

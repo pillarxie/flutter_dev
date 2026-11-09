@@ -34,16 +34,21 @@ class LogPage {
   final List<LogEntry> entries;
   final int? nextAfterId;
   final int? droppedBeforeId;
+  final int? clearedThroughId;
 
   const LogPage({
     required this.entries,
     this.nextAfterId,
     this.droppedBeforeId,
+    this.clearedThroughId,
   });
 
   @override
   int get hashCode =>
-      entries.hashCode ^ nextAfterId.hashCode ^ droppedBeforeId.hashCode;
+      entries.hashCode ^
+      nextAfterId.hashCode ^
+      droppedBeforeId.hashCode ^
+      clearedThroughId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -52,5 +57,6 @@ class LogPage {
           runtimeType == other.runtimeType &&
           entries == other.entries &&
           nextAfterId == other.nextAfterId &&
-          droppedBeforeId == other.droppedBeforeId;
+          droppedBeforeId == other.droppedBeforeId &&
+          clearedThroughId == other.clearedThroughId;
 }
